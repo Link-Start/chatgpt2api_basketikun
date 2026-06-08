@@ -31,7 +31,7 @@ def require_identity(authorization: str | None) -> dict[str, object]:
     token = extract_bearer_token(authorization)
     identity = _legacy_admin_identity(token) or auth_service.authenticate(token)
     if identity is None:
-        raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
+        raise HTTPException(status_code=401, detail={"error": "密钥无效或已失效，请重新登录"})
     return identity
 
 
@@ -42,7 +42,7 @@ def require_auth_key(authorization: str | None) -> None:
 def require_admin(authorization: str | None) -> dict[str, object]:
     identity = require_identity(authorization)
     if identity.get("role") != "admin":
-        raise HTTPException(status_code=403, detail={"error": "admin permission required"})
+        raise HTTPException(status_code=403, detail={"error": "需要管理员权限才能执行这个操作"})
     return identity
 
 
@@ -86,14 +86,28 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
         while not stop_event.is_set():
             try:
                 limited_tokens = account_service.list_limited_tokens()
-                if limited_tokens:
-                    print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
-                    account_service.refresh_accounts(limited_tokens)
+                expiring_tokens = account_service.list_expiring_access_tokens()
+                keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
+                tokens = list(dict.fromkeys([*limited_tokens, *expiring_tokens]))
+                expiring_token_set = set(expiring_tokens)
+                keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
+                if tokens:
+                    print(
+                        "[account-watcher] checking "
+                        f"{len(limited_tokens)} limited accounts, "
+                        f"{len(expiring_tokens)} expiring access tokens"
+                    )
+                    account_service.refresh_accounts(tokens)
+                if keepalive_tokens:
+                    print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
+                    result = account_service.keepalive_refresh_tokens(keepalive_tokens)
+                    if result.get("errors"):
+                        print(f"[account-watcher] keepalive errors: {result['errors']}")
             except Exception as exc:
-                print(f"[account-limited-watcher] fail {exc}")
+                print(f"[account-watcher] fail {exc}")
             stop_event.wait(interval_seconds)
 
-    thread = Thread(target=worker, name="limited-account-watcher", daemon=True)
+    thread = Thread(target=worker, name="account-watcher", daemon=True)
     thread.start()
     return thread
 

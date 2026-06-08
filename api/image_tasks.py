@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
+from services.content_filter import check_request
 from services.image_task_service import image_task_service
+from services.log_service import LoggedCall
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -13,10 +16,23 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+    quality: str = "auto"
+
+
+class ResumePollRequest(BaseModel):
+    extra_timeout_secs: float = Field(default=30.0, ge=5.0, le=120.0)
 
 
 def _parse_task_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+async def filter_or_log(call: LoggedCall, text: str) -> None:
+    try:
+        await run_in_threadpool(check_request, text)
+    except HTTPException as exc:
+        call.log("调用失败", status="failed", error=str(exc.detail))
+        raise
 
 
 def create_router() -> APIRouter:
@@ -37,6 +53,7 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
+        await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
         try:
             return await run_in_threadpool(
                 image_task_service.submit_generation,
@@ -45,6 +62,7 @@ def create_router() -> APIRouter:
                 prompt=body.prompt,
                 model=body.model,
                 size=body.size,
+                quality=body.quality,
                 base_url=resolve_image_base_url(request),
             )
         except ValueError as exc:
@@ -54,23 +72,16 @@ def create_router() -> APIRouter:
     async def create_edit_task(
         request: Request,
         authorization: str | None = Header(default=None),
-        image: list[UploadFile] | None = File(default=None),
-        image_list: list[UploadFile] | None = File(default=None, alias="image[]"),
-        client_task_id: str = Form(...),
-        prompt: str = Form(...),
-        model: str = Form(default="gpt-image-2"),
-        size: str | None = Form(default=None),
     ):
         identity = require_identity(authorization)
-        uploads = [*(image or []), *(image_list or [])]
-        if not uploads:
-            raise HTTPException(status_code=400, detail={"error": "image file is required"})
-        images: list[tuple[bytes, str, str]] = []
-        for upload in uploads:
-            image_data = await upload.read()
-            if not image_data:
-                raise HTTPException(status_code=400, detail={"error": "image file is empty"})
-            images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
+        payload, image_sources = await parse_image_edit_request(request)
+        client_task_id = str(payload.get("client_task_id") or "").strip()
+        if not client_task_id:
+            raise HTTPException(status_code=400, detail={"error": "client_task_id is required"})
+        prompt = str(payload["prompt"])
+        model = str(payload["model"])
+        await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
+        images = await read_image_sources(image_sources)
         try:
             return await run_in_threadpool(
                 image_task_service.submit_edit,
@@ -78,9 +89,28 @@ def create_router() -> APIRouter:
                 client_task_id=client_task_id,
                 prompt=prompt,
                 model=model,
-                size=size,
+                size=payload["size"],
+                quality=payload["quality"],
                 base_url=resolve_image_base_url(request),
                 images=images,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/image-tasks/{task_id}/resume-poll")
+    async def resume_image_poll(
+        task_id: str,
+        body: ResumePollRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        try:
+            return await run_in_threadpool(
+                image_task_service.resume_poll,
+                identity,
+                task_id,
+                body.extra_timeout_secs,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

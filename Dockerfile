@@ -10,6 +10,7 @@ COPY web/package.json web/bun.lock ./
 RUN npm install
 
 COPY VERSION /app/VERSION
+COPY CHANGELOG.md /app/CHANGELOG.md
 COPY web ./
 RUN NEXT_PUBLIC_APP_VERSION="$(cat /app/VERSION)" npm run build
 
@@ -33,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libpq-dev \
     gcc \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

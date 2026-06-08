@@ -66,9 +66,15 @@ class RegisterService:
         with self._lock:
             return json.loads(json.dumps({**self._config, "logs": self._logs[-300:]}, ensure_ascii=False))
 
+    def _inject_proxy_to_mail(self) -> None:
+        proxy = str(self._config.get("proxy") or "").strip()
+        if proxy and isinstance(self._config.get("mail"), dict):
+            self._config["mail"]["proxy"] = proxy
+
     def update(self, updates: dict) -> dict:
         with self._lock:
             self._config = _normalize({**self._config, **updates})
+            self._inject_proxy_to_mail()
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             self._save()
             return self.get()
@@ -80,6 +86,7 @@ class RegisterService:
                 self._save()
                 return self.get()
             self._config["enabled"] = True
+            self._inject_proxy_to_mail()
             self._logs = []
             metrics = self._pool_metrics()
             self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
@@ -118,7 +125,7 @@ class RegisterService:
         items = account_service.list_accounts()
         normal = [item for item in items if item.get("status") == "正常"]
         return {
-            "current_quota": sum(int(item.get("quota") or 0) for item in normal if not item.get("imageQuotaUnknown")),
+            "current_quota": sum(int(item.get("quota") or 0) for item in normal if not item.get("image_quota_unknown")),
             "current_available": len(normal),
         }
 
@@ -156,12 +163,12 @@ class RegisterService:
             self._save()
 
     def _run(self) -> None:
-        cfg = self.get()
-        threads = int(cfg["threads"])
+        threads = int(self.get()["threads"])
         submitted, done, success, fail = 0, 0, 0, 0
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = set()
             while True:
+                cfg = self.get()
                 while self.get()["enabled"] and not self._target_reached(cfg, submitted) and len(futures) < threads:
                     submitted += 1
                     futures.add(executor.submit(openai_register.worker, submitted))

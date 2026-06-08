@@ -1,17 +1,28 @@
-import { httpRequest } from "@/lib/request";
+import { httpRequest, request } from "@/lib/request";
 
-export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
+export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
-export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
+export type ImageModel = string;
 export type AuthRole = "admin" | "user";
+export type ImageStorageMode = "local" | "webdav" | "both";
+
+export type ImageStorageSettings = {
+  enabled: boolean;
+  mode: ImageStorageMode;
+  webdav_url: string;
+  webdav_username: string;
+  webdav_password: string;
+  webdav_root_path: string;
+  public_base_url: string;
+};
 
 export type Account = {
-  id: string;
   access_token: string;
   type: AccountType;
+  source_type?: string | null;
   status: AccountStatus;
   quota: number;
-  imageQuotaUnknown?: boolean;
+  image_quota_unknown?: boolean;
   email?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{
@@ -20,14 +31,39 @@ export type Account = {
     reset_after?: string;
   }>;
   default_model_slug?: string | null;
-  restoreAt?: string | null;
+  restore_at?: string | null;
   success: number;
   fail: number;
-  lastUsedAt: string | null;
+  last_used_at?: string | null;
+  proxy?: string | null;
+};
+
+export type AccountImportPayload = {
+  access_token: string;
+  accessToken?: string;
+  type?: string;
+  export_type?: string;
+  source_type?: string;
+  [key: string]: unknown;
+};
+
+export type Model = {
+  id: string;
+  object: string;
+  created: number;
+  owned_by: string;
+  permission: unknown[];
+  root: string;
+  parent: string | null;
 };
 
 type AccountListResponse = {
   items: Account[];
+};
+
+type ModelListResponse = {
+  object: string;
+  data: Model[];
 };
 
 type AccountMutationResponse = {
@@ -36,13 +72,26 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  relogined?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
-type AccountRefreshResponse = {
+export type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  relogined?: number;
   errors: Array<{ access_token: string; error: string }>;
+};
+
+export type RefreshProgressResponse = {
+  total: number;
+  processed: number;
+  done: boolean;
+  error: string | null;
+  status_counts?: Record<string, number>;
+  total_quota?: number;
+  result?: AccountRefreshResponse | null;
+  results?: Array<{ token: string; status: string; error?: string | null }>;
 };
 
 type AccountUpdateResponse = {
@@ -53,24 +102,115 @@ type AccountUpdateResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  global_system_prompt?: string;
+  sensitive_words?: string[];
+  ai_review?: {
+    enabled?: boolean;
+    base_url?: string;
+    api_key?: string;
+    model?: string;
+    prompt?: string;
+  };
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
+  image_poll_timeout_secs?: number | string;
+  image_account_concurrency?: number | string;
+  image_parallel_generation?: boolean;
+  image_settle_enabled?: boolean;
+  image_check_before_hit_enabled?: boolean;
+  image_settle_secs?: number | string;
+  image_timeout_retry_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
+  auto_relogin_after_refresh?: boolean;
   log_levels?: string[];
+  image_storage?: ImageStorageSettings;
+  backup?: BackupSettings;
+  backup_state?: BackupState;
   [key: string]: unknown;
 };
 
+export type BackupInclude = {
+  config: boolean;
+  register: boolean;
+  cpa: boolean;
+  sub2api: boolean;
+  logs: boolean;
+  image_tasks: boolean;
+  accounts_snapshot: boolean;
+  auth_keys_snapshot: boolean;
+  images: boolean;
+};
+
+export type BackupSettings = {
+  enabled: boolean;
+  provider: "cloudflare_r2" | string;
+  account_id: string;
+  access_key_id: string;
+  secret_access_key: string;
+  bucket: string;
+  prefix: string;
+  interval_minutes: number | string;
+  rotation_keep: number | string;
+  encrypt: boolean;
+  passphrase: string;
+  include: BackupInclude;
+};
+
+export type BackupState = {
+  running: boolean;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+  last_status?: string;
+  last_error?: string | null;
+  last_object_key?: string | null;
+};
+
+export type BackupItem = {
+  key: string;
+  name: string;
+  size: number;
+  updated_at?: string | null;
+  encrypted: boolean;
+};
+
+export type BackupDetail = {
+  key: string;
+  name: string;
+  encrypted: boolean;
+  created_at?: string | null;
+  trigger?: string | null;
+  app_version?: string | null;
+  storage_backend?: Record<string, unknown> | null;
+  files: Array<{
+    name: string;
+    exists: boolean;
+    content_type?: string;
+    size: number;
+    sha256?: string;
+  }>;
+  snapshots: Array<{
+    name: string;
+    count: number;
+  }>;
+};
+
 export type ManagedImage = {
+  rel: string;
   path?: string;
   name: string;
   date: string;
   size: number;
   url: string;
+  thumbnail_url?: string;
   created_at: string;
+  width?: number;
+  height?: number;
+  tags?: string[];
 };
 
 export type SystemLog = {
+  id: string;
   time: string;
   type: "call" | "account" | string;
   summary?: string;
@@ -89,10 +229,15 @@ export type ImageTask = {
   mode: "generate" | "edit";
   model?: ImageModel;
   size?: string;
+  quality?: string;
   created_at: string;
   updated_at: string;
+  conversation_id?: string;
   data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
   error?: string;
+  progress?: string;
+  elapsed_secs?: number;
+  duration_ms?: number;
 };
 
 type ImageTaskListResponse = {
@@ -171,10 +316,35 @@ export async function fetchAccounts() {
   return httpRequest<AccountListResponse>("/api/accounts");
 }
 
-export async function createAccounts(tokens: string[]) {
+export async function fetchModels() {
+  return httpRequest<ModelListResponse>("/v1/models");
+}
+
+export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
-    body: { tokens },
+    body: { tokens, accounts },
+  });
+}
+
+export type OAuthLoginStartResponse = {
+  session_id: string;
+  authorize_url: string;
+  expires_in: string;
+  redirect_uri_prefix: string;
+};
+
+export async function startOAuthLogin(emailHint?: string) {
+  return httpRequest<OAuthLoginStartResponse>("/api/accounts/oauth/start", {
+    method: "POST",
+    body: { email_hint: emailHint ?? "" },
+  });
+}
+
+export async function finishOAuthLogin(sessionId: string, callback: string) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/oauth/finish", {
+    method: "POST",
+    body: { session_id: sessionId, callback },
   });
 }
 
@@ -186,10 +356,25 @@ export async function deleteAccounts(tokens: string[]) {
 }
 
 export async function refreshAccounts(accessTokens: string[]) {
-  return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
+  return httpRequest<{ progress_id: string }>("/api/accounts/refresh", {
     method: "POST",
     body: { access_tokens: accessTokens },
   });
+}
+
+export async function fetchRefreshProgress(progressId: string) {
+  return httpRequest<RefreshProgressResponse>(`/api/accounts/refresh/progress/${progressId}`);
+}
+
+export async function reLoginAccounts(accessTokens: string[]) {
+  return httpRequest<{ progress_id: string }>("/api/accounts/re-login", {
+    method: "POST",
+    body: { access_tokens: accessTokens },
+  });
+}
+
+export async function fetchReLoginProgress(progressId: string) {
+  return httpRequest<RefreshProgressResponse>(`/api/accounts/re-login/progress/${progressId}`);
 }
 
 export async function updateAccount(
@@ -198,6 +383,7 @@ export async function updateAccount(
     type?: AccountType;
     status?: AccountStatus;
     quota?: number;
+    proxy?: string;
   },
 ) {
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {
@@ -209,7 +395,7 @@ export async function updateAccount(
   });
 }
 
-export async function generateImage(prompt: string, model?: ImageModel, size?: string) {
+export async function generateImage(prompt: string, model?: ImageModel, size?: string, quality = "auto") {
   return httpRequest<ImageResponse>(
     "/v1/images/generations",
     {
@@ -218,6 +404,7 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
         prompt,
         ...(model ? { model } : {}),
         ...(size ? { size } : {}),
+        quality,
         n: 1,
         response_format: "b64_json",
       },
@@ -225,7 +412,7 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
   );
 }
 
-export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string) {
+export async function editImage(files: File | File[], prompt: string, model?: ImageModel, size?: string, quality = "auto") {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
 
@@ -239,6 +426,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   if (size) {
     formData.append("size", size);
   }
+  formData.append("quality", quality);
   formData.append("n", "1");
 
   return httpRequest<ImageResponse>(
@@ -250,7 +438,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string) {
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto") {
   return httpRequest<ImageTask>("/api/image-tasks/generations", {
     method: "POST",
     body: {
@@ -258,6 +446,7 @@ export async function createImageGenerationTask(clientTaskId: string, prompt: st
       prompt,
       ...(model ? { model } : {}),
       ...(size ? { size } : {}),
+      quality,
     },
   });
 }
@@ -268,6 +457,7 @@ export async function createImageEditTask(
   prompt: string,
   model?: ImageModel,
   size?: string,
+  quality = "auto",
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -283,6 +473,7 @@ export async function createImageEditTask(
   if (size) {
     formData.append("size", size);
   }
+  formData.append("quality", quality);
 
   return httpRequest<ImageTask>("/api/image-tasks/edits", {
     method: "POST",
@@ -295,7 +486,15 @@ export async function fetchImageTasks(ids: string[]) {
   if (ids.length > 0) {
     params.set("ids", ids.join(","));
   }
-  return httpRequest<ImageTaskListResponse>(`/api/image-tasks${params.toString() ? `?${params.toString()}` : ""}`);
+  params.set("_t", String(Date.now()));
+  return httpRequest<ImageTaskListResponse>(`/api/image-tasks?${params.toString()}`);
+}
+
+export async function resumeImagePoll(taskId: string, extraTimeoutSecs = 30) {
+  return httpRequest<ImageTask>(`/api/image-tasks/${encodeURIComponent(taskId)}/resume-poll`, {
+    method: "POST",
+    body: { extra_timeout_secs: extraTimeoutSecs },
+  });
 }
 
 export async function fetchSettingsConfig() {
@@ -307,6 +506,57 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
     method: "POST",
     body: settings,
   });
+}
+
+export async function testBackupConnection() {
+  return httpRequest<{ result: { ok: boolean; status: number } }>("/api/backup/test", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function testImageStorageConnection() {
+  return httpRequest<{ result: { ok: boolean; status: number; error?: string } }>("/api/image-storage/test", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function syncImageStorage() {
+  return httpRequest<{ result: { uploaded: number; skipped: number; failed: number } }>("/api/image-storage/sync", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function fetchBackups() {
+  return httpRequest<{ items: BackupItem[]; state: BackupState; settings: BackupSettings }>("/api/backups");
+}
+
+export async function runBackupNow() {
+  return httpRequest<{ result: { key: string; size: number; encrypted: boolean } }>("/api/backups/run", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function deleteBackup(key: string) {
+  return httpRequest<{ ok: boolean }>("/api/backups/delete", {
+    method: "POST",
+    body: { key },
+  });
+}
+
+export async function fetchBackupDetail(key: string) {
+  const params = new URLSearchParams();
+  params.set("key", key);
+  return httpRequest<{ item: BackupDetail }>(`/api/backups/detail?${params.toString()}`);
+}
+
+export function getBackupDownloadUrl(key: string) {
+  const params = new URLSearchParams();
+  params.set("key", key);
+  return `/api/backups/download?${params.toString()}`;
 }
 
 export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
@@ -322,12 +572,82 @@ export async function deleteManagedImages(body: { paths?: string[]; start_date?:
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
 
+export async function downloadImages(paths: string[]) {
+  const response = await request.post("/api/images/download", { paths }, { responseType: "blob" });
+  const blob = response.data as Blob;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "images.zip";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadSingleImage(path: string) {
+  const response = await request.get(`/api/images/download/${path}`, { responseType: "blob" });
+  const blob = response.data as Blob;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = path.split("/").pop() || "image.png";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function fetchImageTags() {
+  return httpRequest<{ tags: string[] }>("/api/images/tags");
+}
+
+export async function setImageTags(path: string, tags: string[]) {
+  return httpRequest<{ ok: boolean; tags: string[] }>("/api/images/tags", {
+    method: "POST",
+    body: { path, tags },
+  });
+}
+
+export async function deleteImageTag(tag: string) {
+  return httpRequest<{ ok: boolean; removed_from: number }>(`/api/images/tags/${encodeURIComponent(tag)}`, {
+    method: "DELETE",
+  });
+}
+
+export type ImageStorageStats = {
+  disk_total_mb: number; disk_used_mb: number; disk_free_mb: number;
+  image_count: number; image_size_mb: number; image_size_bytes: number;
+};
+
+export async function fetchImageStorage() {
+  return httpRequest<ImageStorageStats>("/api/images/storage");
+}
+
+export async function compressAllImages() {
+  return httpRequest<{ compressed: number; saved_bytes: number; saved_mb: number }>("/api/images/storage/compress", { method: "POST" });
+}
+
+export async function deleteToTarget(targetFreeMb: number) {
+  return httpRequest<{ removed: number; freed_mb: number; done: boolean }>(
+    `/api/images/storage/cleanup-to-target?target_free_mb=${targetFreeMb}&dry_run=false`,
+    { method: "POST" },
+  );
+}
+
 export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function deleteSystemLogs(ids: string[]) {
+  return httpRequest<{ removed: number }>("/api/logs/delete", {
+    method: "POST",
+    body: { ids },
+  });
 }
 
 export async function fetchUserKeys() {
@@ -341,7 +661,7 @@ export async function createUserKey(name: string) {
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string }) {
+export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; key?: string }) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,
