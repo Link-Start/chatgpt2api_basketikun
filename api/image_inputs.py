@@ -9,7 +9,8 @@ from pathlib import PurePosixPath
 from typing import Any, TypeGuard
 from urllib.parse import unquote, unquote_to_bytes, urlparse
 
-from curl_cffi import requests
+import httpx
+from utils.http_client import get
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -234,7 +235,7 @@ def _decode_data_url(url: str) -> ImageInput:
     return data, f"image_url.{_extension_from_mime(mime_type)}", mime_type
 
 
-def _response_mime_type(response: requests.Response, parsed_path: str) -> str:
+def _response_mime_type(response: httpx.Response, parsed_path: str) -> str:
     """识别下载图片类型：优先响应头，必要时按 URL 后缀推断。"""
     header_type = str(response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
     guessed_type = mimetypes.guess_type(parsed_path)[0] or ""
@@ -264,12 +265,12 @@ def _download_image_url(url: str) -> ImageInput:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail={"error": "image_url must be an http or https URL"})
     try:
-        response = requests.get(
+        response = get(
             source,
             headers={"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api image fetcher"},
             timeout=60,
-            allow_redirects=True,
-            **proxy_settings.build_session_kwargs(),
+            follow_redirects=True,
+            **proxy_settings.build_client_kwargs(),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc

@@ -1,32 +1,17 @@
 import base64
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from typing import Any
 
 from services.account_service import AccountService
 
 
-class MemoryStorage:
-    def __init__(self, accounts: list[dict[str, Any]] | None = None) -> None:
-        self.accounts = list(accounts or [])
-
-    def load_accounts(self) -> list[dict[str, Any]]:
-        return list(self.accounts)
-
-    def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
-        self.accounts = list(accounts)
-
-    def load_auth_keys(self) -> list[dict[str, Any]]:
-        return []
-
-    def save_auth_keys(self, auth_keys: list[dict[str, Any]]) -> None:
-        pass
-
-    def health_check(self) -> dict[str, Any]:
-        return {"ok": True}
-
-    def get_backend_info(self) -> dict[str, Any]:
-        return {"type": "memory"}
+def make_service(tmp_dir: str, accounts: list[dict[str, Any]] | None = None) -> AccountService:
+    path = Path(tmp_dir) / "accounts.json"
+    path.write_text(json.dumps(accounts or [], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return AccountService(path)
 
 
 def make_jwt(payload: dict[str, Any]) -> str:
@@ -48,19 +33,19 @@ class AccountExportTests(unittest.TestCase):
             }
         )
         id_token = make_jwt({"email": "fallback@example.com"})
-        service = AccountService(
-            MemoryStorage(
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = make_service(
+                tmp_dir,
                 [
                     {
                         "access_token": access_token,
                         "id_token": id_token,
                         "refresh_token": "rt_test",
                     }
-                ]
+                ],
             )
-        )
 
-        [item] = service.build_export_items([access_token])
+            [item] = service.build_export_items([access_token])
 
         self.assertEqual(item["type"], "codex")
         self.assertEqual(item["email"], "test@example.com")
@@ -74,17 +59,17 @@ class AccountExportTests(unittest.TestCase):
     def test_build_export_items_skips_accounts_missing_complete_tokens(self) -> None:
         complete_access_token = make_jwt({"exp": 0})
         complete_id_token = make_jwt({"email": "complete@example.com"})
-        service = AccountService(
-            MemoryStorage(
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = make_service(
+                tmp_dir,
                 [
                     {"access_token": "only_access"},
                     {"access_token": "missing_id", "refresh_token": "rt_missing_id"},
                     {"access_token": complete_access_token, "id_token": complete_id_token, "refresh_token": "rt_complete"},
-                ]
+                ],
             )
-        )
 
-        items = service.build_export_items()
+            items = service.build_export_items()
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["access_token"], complete_access_token)
@@ -92,20 +77,21 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(items[0]["refresh_token"], "rt_complete")
 
     def test_add_account_items_preserves_export_fields_without_overwriting_plan_type(self) -> None:
-        service = AccountService(MemoryStorage())
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = make_service(tmp_dir)
 
-        result = service.add_account_items(
-            [
-                {
-                    "type": "codex",
-                    "access_token": "access_token_test",
-                    "refresh_token": "rt_test",
-                    "account_id": "acct_123",
-                }
-            ]
-        )
+            result = service.add_account_items(
+                [
+                    {
+                        "type": "codex",
+                        "access_token": "access_token_test",
+                        "refresh_token": "rt_test",
+                        "account_id": "acct_123",
+                    }
+                ]
+            )
 
-        account = service.get_account("access_token_test")
+            account = service.get_account("access_token_test")
         self.assertEqual(result["added"], 1)
         self.assertIsNotNone(account)
         self.assertEqual(account["type"], "free")

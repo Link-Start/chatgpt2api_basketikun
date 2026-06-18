@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from services.config import (
     DEFAULT_PROXY_RUNTIME,
     ConfigStore,
@@ -15,11 +17,11 @@ from services.config import (
 class ProxyRuntimeConfigTests(unittest.TestCase):
     def _make_store(self, initial: dict[str, object] | None = None) -> tuple[tempfile.TemporaryDirectory[str], ConfigStore]:
         tmp_dir = tempfile.TemporaryDirectory()
-        path = Path(tmp_dir.name) / "config.json"
-        data = {"auth-key": "test-auth"}
+        path = Path(tmp_dir.name) / "config.yaml"
+        data: dict[str, object] = {}
         if initial:
             data.update(initial)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        path.write_text(yaml.safe_dump(data), encoding="utf-8")
         return tmp_dir, ConfigStore(path)
 
     def test_defaults_are_safe_and_included_in_public_config(self) -> None:
@@ -36,7 +38,6 @@ class ProxyRuntimeConfigTests(unittest.TestCase):
             public_config = store.get()
             self.assertEqual(public_config["proxy"], " http://legacy.example:8080 ")
             self.assertEqual(public_config["proxy_runtime"], expected_public)
-            self.assertNotIn("auth-key", public_config)
 
             runtime["enabled"] = True
             runtime["clearance"]["enabled"] = True
@@ -182,7 +183,7 @@ class ProxyRuntimeConfigTests(unittest.TestCase):
             expected_public["clearance"]["has_cf_clearance"] = False
             self.assertEqual(public_config["proxy_runtime"], expected_public)
 
-            raw_saved = json.loads(store.path.read_text(encoding="utf-8"))
+            raw_saved = yaml.safe_load(store.path.read_text(encoding="utf-8"))
             self.assertEqual(raw_saved["proxy_runtime"], expected)
             reloaded = ConfigStore(store.path)
             self.assertEqual(reloaded.get_proxy_runtime_settings(), expected)
@@ -208,7 +209,7 @@ class ProxyRuntimeConfigTests(unittest.TestCase):
 
             public_clearance["user_agent"] = "Updated UA"
             updated_public = store.update({"proxy_runtime": public_runtime})
-            updated_raw = json.loads(store.path.read_text(encoding="utf-8"))["proxy_runtime"]
+            updated_raw = yaml.safe_load(store.path.read_text(encoding="utf-8"))["proxy_runtime"]
             self.assertEqual(updated_raw["clearance"]["cf_cookies"], "session=secret-cookie")
             self.assertEqual(updated_raw["clearance"]["cf_clearance"], "secret-clearance")
             self.assertEqual(updated_raw["clearance"]["user_agent"], "Updated UA")

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown, FileArchive, FileText, KeyRound, ListChecks, type LucideIcon } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
+import { SystemModels } from "@/components/system-models";
 import webConfig from "@/constants/common-env";
 import { getStoredAuthSession } from "@/store/auth";
 
@@ -215,8 +216,6 @@ const docs: ApiDoc[] = [
   },
 ];
 
-const usableModels = ["gpt-image-2", "codex-gpt-image-2", "auto", "gpt-5", "gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"];
-
 function ParamTable({ rows }: { rows: ParamRow[] }) {
   return (
     <div className="overflow-hidden rounded-lg border border-stone-200">
@@ -290,14 +289,10 @@ export function ApiDocsCard() {
           </div>
         </div>
 
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-stone-600">常用模型，也可请求 /v1/models 获取</div>
-          <div className="flex flex-wrap gap-2">
-            {usableModels.map((model) => (
-              <span key={model} className="rounded-md border border-stone-200 bg-white px-2 py-1 font-mono text-xs text-stone-700">{model}</span>
-            ))}
-          </div>
-        </div>
+        <SystemModels
+          variant="inline"
+          title="系统可用模型"
+        />
 
         <div className="space-y-3">
           {docs.map((item) => {

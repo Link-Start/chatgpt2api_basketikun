@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-from urllib.parse import quote
-
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
-from services.backup_service import BackupError, backup_service
-from services.config import config
+from services.config import DATA_DIR, config
 from services.image_service import (
     compress_images,
     delete_images,
@@ -17,14 +14,35 @@ from services.image_service import (
     download_images_zip,
     get_image_download_response,
     get_image_response,
-    get_thumbnail_response,
     list_images,
     storage_stats,
 )
 from services.image_storage_service import ImageStorageError, image_storage_service
-from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import proxy_settings, test_clearance, test_proxy
+
+
+def _json_storage_info() -> dict[str, object]:
+    accounts_file = DATA_DIR / "accounts.json"
+    auth_keys_file = DATA_DIR / "auth_keys.json"
+    return {
+        "type": "json",
+        "description": "本地 JSON 文件存储",
+        "file_path": str(accounts_file),
+        "file_exists": accounts_file.exists(),
+        "auth_keys_file_path": str(auth_keys_file),
+        "auth_keys_file_exists": auth_keys_file.exists(),
+    }
+
+
+def _json_storage_health() -> dict[str, object]:
+    try:
+        for path in (DATA_DIR / "accounts.json", DATA_DIR / "auth_keys.json"):
+            if path.exists():
+                path.read_text(encoding="utf-8")
+        return {"status": "healthy", "storage": "json"}
+    except Exception as e:
+        return {"status": "unhealthy", "storage": "json", "error": str(e)}
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -48,14 +66,8 @@ class ImageDeleteRequest(BaseModel):
 class ImageDownloadRequest(BaseModel):
     paths: list[str]
 
-class ImageTagsRequest(BaseModel):
-    path: str
-    tags: list[str]
-
 class LogDeleteRequest(BaseModel):
     ids: list[str] = []
-class BackupDeleteRequest(BaseModel):
-    key: str = ""
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -102,10 +114,6 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/images/{image_path:path}", include_in_schema=False)
     async def get_image(image_path: str):
         return get_image_response(image_path)
-
-    @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
-    async def get_image_thumbnail(image_path: str):
-        return get_thumbnail_response(image_path)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
@@ -170,19 +178,10 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/storage/info")
     async def get_storage_info(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        storage = config.get_storage_backend()
         return {
-            "backend": storage.get_backend_info(),
-            "health": storage.health_check(),
+            "storage": _json_storage_info(),
+            "health": _json_storage_health(),
         }
-
-    @router.post("/api/backup/test")
-    async def test_backup_connection(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"result": await run_in_threadpool(backup_service.test_connection)}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.post("/api/image-storage/test")
     async def test_image_storage_endpoint(authorization: str | None = Header(default=None)):
@@ -196,83 +195,6 @@ def create_router(app_version: str) -> APIRouter:
             return {"result": await run_in_threadpool(image_storage_service.sync_all)}
         except ImageStorageError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/backups")
-    async def get_backups(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {
-                "items": await run_in_threadpool(backup_service.list_backups),
-                "state": backup_service.get_status(),
-                "settings": backup_service.get_settings(),
-            }
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.post("/api/backups/run")
-    async def run_backup_endpoint(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"result": await run_in_threadpool(backup_service.run_backup)}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.post("/api/backups/delete")
-    async def delete_backup_endpoint(body: BackupDeleteRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            await run_in_threadpool(backup_service.delete_backup, body.key)
-            return {"ok": True}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/backups/detail")
-    async def get_backup_detail(key: str = "", authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            return {"item": await run_in_threadpool(backup_service.get_backup_detail, key)}
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/backups/download")
-    async def download_backup_endpoint(key: str = "", authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        try:
-            item = await run_in_threadpool(backup_service.download_backup, key)
-        except BackupError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-        filename = str(item.get("name") or "backup.bin")
-        quoted = quote(filename)
-        headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
-            "Content-Length": str(int(item.get("size") or 0)),
-        }
-        return Response(
-            content=bytes(item.get("payload") or b""),
-            media_type=str(item.get("content_type") or "application/octet-stream"),
-            headers=headers,
-        )
-
-
-    @router.get("/api/images/tags")
-    async def list_image_tags(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return {"tags": get_all_tags()}
-
-    @router.post("/api/images/tags")
-    async def update_image_tags(body: ImageTagsRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        rel = body.path.strip().lstrip("/")
-        if not rel:
-            raise HTTPException(status_code=400, detail={"error": "path is required"})
-        tags = set_tags(rel, body.tags)
-        return {"ok": True, "tags": tags}
-
-    @router.delete("/api/images/tags/{tag}")
-    async def delete_image_tag(tag: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        count = delete_tag(tag)
-        return {"ok": True, "removed_from": count}
 
     @router.get("/api/images/storage")
     async def get_image_storage(authorization: str | None = Header(default=None)):
@@ -297,15 +219,14 @@ def create_router(app_version: str) -> APIRouter:
     async def health_dashboard(format: str = Query(default="html")):
         from services.account_service import account_service as acct_svc
         stats = acct_svc.get_stats()
-        storage = config.get_storage_backend()
-        storage_health = storage.health_check()
+        storage_health = _json_storage_health()
         healthy = stats["active"] > 0 or stats["unlimited_quota_count"] > 0
 
         stats_json = {
             "status": "ok" if healthy else "degraded",
             "healthy": healthy,
             "version": app_version,
-            "storage": {"backend": storage.get_backend_info(), "health": storage_health},
+            "storage": {"info": _json_storage_info(), "health": storage_health},
             "proxy_runtime": proxy_settings.get_runtime_status(),
             "accounts": stats,
         }

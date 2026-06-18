@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Idempotently merge WARP/FlareSolverr proxy_runtime defaults into config.json."""
+"""Idempotently merge WARP/FlareSolverr proxy_runtime defaults into config.yaml."""
 
 from __future__ import annotations
 
 import copy
-import json
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -125,19 +126,26 @@ def _mask_url(value: str) -> str:
 
 
 def main() -> int:
-    config_path = Path(os.getenv("CHATGPT2API_CONFIG_FILE", "/app/config.json"))
+    config_path = Path(os.getenv("CHATGPT2API_CONFIG_FILE", "/app/config.yaml"))
     if not config_path.exists():
-        print(f"Config file not found, creating {config_path}")
-        data: dict[str, Any] = {}
-    else:
+        example_path = Path(os.getenv("CHATGPT2API_EXAMPLE_CONFIG_FILE", "/app/config.example.yaml"))
+        if example_path.exists():
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            print(f"Config file not found, creating {config_path}")
+
+    if config_path.exists():
         try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            print(f"Invalid JSON in {config_path}: {exc}", file=sys.stderr)
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            print(f"Invalid YAML in {config_path}: {exc}", file=sys.stderr)
             return 1
         if not isinstance(data, dict):
             print(f"Config root must be an object: {config_path}", file=sys.stderr)
             return 1
+    else:
+        data: dict[str, Any] = {}
 
     desired = _warp_runtime_defaults()
     existing = data.get("proxy_runtime")
@@ -155,7 +163,7 @@ def main() -> int:
 
     if changed:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+        payload = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
         tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
         try:
             tmp_path.write_text(payload, encoding="utf-8")

@@ -11,6 +11,7 @@ from typing import Any, Iterable, Iterator
 import tiktoken
 
 from services.account_service import account_service
+from services.codex_api import CODEX_RESPONSES_MODEL, CodexAPI
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
@@ -672,7 +673,8 @@ def conversation_events(
 
 
 def text_backend() -> OpenAIBackendAPI:
-    return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
+    token = account_service.get_text_access_token()
+    return OpenAIBackendAPI(account=account_service.get_account(token) or {"access_token": token})
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
@@ -685,7 +687,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         if token:
             attempted_tokens.add(token)
         try:
-            active_backend = OpenAIBackendAPI(access_token=token)
+            active_backend = OpenAIBackendAPI(account=account_service.get_account(token) or {"access_token": token})
             for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
                 if event.get("type") != "conversation.delta":
                     continue
@@ -1186,12 +1188,19 @@ def _codex_response_images(value: Any) -> list[str]:
 
 
 def stream_codex_image_outputs(
-        backend: OpenAIBackendAPI,
+        access_token: str,
         request: ConversationRequest,
         index: int = 1,
         total: int = 1,
+        base_url: str = "https://chatgpt.com",
+        upstream_model: str = CODEX_RESPONSES_MODEL,
 ) -> Iterator[ImageOutput]:
-    images = _codex_response_images(list(backend.iter_codex_image_response_events(
+    codex_api = CodexAPI(
+        base_url=base_url,
+        access_token=access_token,
+        model=upstream_model,
+    )
+    images = _codex_response_images(list(codex_api.iter_image_response_events(
         prompt=request.prompt,
         images=request.images or [],
         size=request.size,
@@ -1210,6 +1219,25 @@ def stream_codex_image_outputs(
         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
     raise ImageGenerationError("No image result found in response")
+
+
+def _generate_codex_channel_image(
+        request: ConversationRequest,
+        channel: dict[str, object],
+        index: int,
+        total: int,
+) -> list[ImageOutput]:
+    outputs: list[ImageOutput] = []
+    for output in stream_codex_image_outputs(
+            str(channel.get("api_key") or ""),
+            request,
+            index,
+            total,
+            base_url=str(channel.get("base_url") or ""),
+            upstream_model=str(channel.get("upstream_model") or CODEX_RESPONSES_MODEL),
+    ):
+        outputs.append(output)
+    return outputs
 
 
 def _generate_single_image(
@@ -1238,6 +1266,9 @@ def _generate_single_image(
     account_email = ""
 
     while True:
+        channel = config.get_codex_channel_for_model(request.model)
+        if channel:
+            return _generate_codex_channel_image(request, channel, index, total)
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1264,12 +1295,15 @@ def _generate_single_image(
             "index": index,
         })
         try:
-            backend = OpenAIBackendAPI(access_token=token)
-            if request.progress_callback:
-                backend.progress_callback = request.progress_callback
-            stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
-            for output in stream_fn(backend, request, index, total):
+            if is_codex_image_model(request.model):
+                output_iter = stream_codex_image_outputs(token, request, index, total)
+            else:
+                backend = OpenAIBackendAPI(account=account or {"access_token": token})
+                if request.progress_callback:
+                    backend.progress_callback = request.progress_callback
+                output_iter = stream_image_outputs(backend, request, index, total)
+            for output in output_iter:
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
@@ -1440,8 +1474,13 @@ def _generate_single_image(
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     """并行生成多张图片，每张图片使用独立线程和账号，互不阻塞。"""
-    if not is_supported_image_model(request.model):
-        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS)))
+    channel_models = {
+        str(channel.get("mapped_model") or "").strip()
+        for channel in config.list_enabled_codex_channels()
+        if str(channel.get("mapped_model") or "").strip()
+    }
+    if not is_supported_image_model(request.model) and not config.get_codex_channel_for_model(request.model):
+        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS | channel_models)))
 
     if request.n <= 1:
         # 单张图片，直接执行（无需线程池开销）

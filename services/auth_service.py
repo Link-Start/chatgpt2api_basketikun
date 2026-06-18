@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Literal
 
-from services.config import config
-from services.storage.base import StorageBackend
+from services.config import DATA_DIR, config
 
 AuthRole = Literal["admin", "user"]
 
@@ -23,8 +24,9 @@ def _hash_key(value: str) -> str:
 
 
 class AuthService:
-    def __init__(self, storage: StorageBackend):
-        self.storage = storage
+    def __init__(self, auth_keys_file: Path | None = None):
+        self.auth_keys_file = auth_keys_file or DATA_DIR / "auth_keys.json"
+        self.auth_keys_file.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
         self._items = self._load()
         self._last_used_flush_at: dict[str, datetime] = {}
@@ -62,15 +64,21 @@ class AuthService:
 
     def _load(self) -> list[dict[str, object]]:
         try:
-            items = self.storage.load_auth_keys()
+            if not self.auth_keys_file.exists():
+                return []
+            raw = json.loads(self.auth_keys_file.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                raw = raw.get("items")
+            items = raw if isinstance(raw, list) else []
         except Exception:
-            return []
-        if not isinstance(items, list):
             return []
         return [normalized for item in items if (normalized := self._normalize_item(item)) is not None]
 
     def _save(self) -> None:
-        self.storage.save_auth_keys(self._items)
+        self.auth_keys_file.write_text(
+            json.dumps({"items": self._items}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def _reload_locked(self) -> None:
         self._items = self._load()
@@ -250,4 +258,4 @@ class AuthService:
         return None
 
 
-auth_service = AuthService(config.get_storage_backend())
+auth_service = AuthService()

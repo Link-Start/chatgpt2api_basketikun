@@ -1,32 +1,41 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
-import json
 import os
+import re
 import sys
 from pathlib import Path
 import time
 
-from services.storage.base import StorageBackend
+import yaml
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-CONFIG_FILE = BASE_DIR / "config.json"
-VERSION_FILE = BASE_DIR / "VERSION"
-BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
 
-DEFAULT_BACKUP_INCLUDE = {
-    "config": True,
-    "register": True,
-    "cpa": True,
-    "sub2api": True,
-    "logs": True,
-    "image_tasks": True,
-    "accounts_snapshot": True,
-    "auth_keys_snapshot": True,
-    "images": False,
-}
+
+def _load_dotenv(path: Path) -> None:
+    if not path.exists() or path.is_dir():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv(BASE_DIR / ".env")
+
+DATA_DIR = BASE_DIR / "data"
+CONFIG_FILE = Path(os.getenv("CHATGPT2API_CONFIG_FILE") or BASE_DIR / "config.yaml")
+EXAMPLE_CONFIG_FILE = Path(os.getenv("CHATGPT2API_EXAMPLE_CONFIG_FILE") or BASE_DIR / "config.example.yaml")
+VERSION_FILE = BASE_DIR / "VERSION"
 
 DEFAULT_IMAGE_STORAGE = {
     "enabled": False,
@@ -83,6 +92,11 @@ DEFAULT_THIRD_PARTY_APPS = {
     },
 }
 
+CODEX_CHANNEL_UPSTREAM_MODELS = {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini"}
+DEFAULT_CODEX_CHANNELS = {
+    "channels": [],
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -103,43 +117,6 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (OverflowError, TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
-
-
-def _normalize_backup_include(value: object) -> dict[str, bool]:
-    source = value if isinstance(value, dict) else {}
-    normalized = dict(DEFAULT_BACKUP_INCLUDE)
-    for key in normalized:
-        normalized[key] = _normalize_bool(source.get(key), normalized[key])
-    return normalized
-
-
-def _normalize_backup_settings(value: object) -> dict[str, object]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "enabled": _normalize_bool(source.get("enabled"), False),
-        "provider": "cloudflare_r2",
-        "account_id": str(source.get("account_id") or "").strip(),
-        "access_key_id": str(source.get("access_key_id") or "").strip(),
-        "secret_access_key": str(source.get("secret_access_key") or "").strip(),
-        "bucket": str(source.get("bucket") or "").strip(),
-        "prefix": str(source.get("prefix") or "backups").strip().strip("/") or "backups",
-        "interval_minutes": _normalize_positive_int(source.get("interval_minutes"), 360, 1),
-        "rotation_keep": _normalize_positive_int(source.get("rotation_keep"), 10, 0),
-        "encrypt": _normalize_bool(source.get("encrypt"), False),
-        "passphrase": str(source.get("passphrase") or "").strip(),
-        "include": _normalize_backup_include(source.get("include")),
-    }
-
-
-def _normalize_backup_state(value: object) -> dict[str, object]:
-    source = value if isinstance(value, dict) else {}
-    return {
-        "last_started_at": str(source.get("last_started_at") or "").strip() or None,
-        "last_finished_at": str(source.get("last_finished_at") or "").strip() or None,
-        "last_status": str(source.get("last_status") or "idle").strip() or "idle",
-        "last_error": str(source.get("last_error") or "").strip() or None,
-        "last_object_key": str(source.get("last_object_key") or "").strip() or None,
-    }
 
 
 def _normalize_image_storage_settings(value: object) -> dict[str, object]:
@@ -288,6 +265,36 @@ def _normalize_third_party_apps_settings(value: object) -> dict[str, object]:
     }
 
 
+def _normalize_codex_channels_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    items = source.get("channels") if isinstance(source.get("channels"), list) else []
+    channels: list[dict[str, object]] = []
+    seen_models: set[str] = set()
+    for index, item in enumerate(items):
+        channel = item if isinstance(item, dict) else {}
+        prefix = str(channel.get("model_prefix") or "").strip().lower()
+        prefix = re.sub(r"[^a-z0-9._-]+", "-", prefix).strip("-")
+        mapped_model = f"{prefix}-gpt-image-2" if prefix else ""
+        if mapped_model and mapped_model in seen_models:
+            continue
+        upstream_model = str(channel.get("upstream_model") or "gpt-5.5").strip()
+        if upstream_model not in CODEX_CHANNEL_UPSTREAM_MODELS:
+            upstream_model = "gpt-5.5"
+        if mapped_model:
+            seen_models.add(mapped_model)
+        channels.append({
+            "id": str(channel.get("id") or f"channel-{index + 1}").strip() or f"channel-{index + 1}",
+            "enabled": _normalize_bool(channel.get("enabled"), False),
+            "name": str(channel.get("name") or "").strip(),
+            "base_url": str(channel.get("base_url") or "").strip().rstrip("/"),
+            "api_key": str(channel.get("api_key") or "").strip(),
+            "upstream_model": upstream_model,
+            "model_prefix": prefix,
+            "mapped_model": mapped_model,
+        })
+    return {"channels": channels}
+
+
 def _validate_image_storage_settings(settings: dict[str, object]) -> None:
     if not _normalize_bool(settings.get("enabled"), False):
         return
@@ -295,12 +302,6 @@ def _validate_image_storage_settings(settings: dict[str, object]) -> None:
         raise ValueError("启用 WebDAV 图片存储后必须填写 WebDAV URL")
     if not str(settings.get("webdav_password") or "").strip():
         raise ValueError("启用 WebDAV 图片存储后必须填写 WebDAV 密码")
-
-
-@dataclass(frozen=True)
-class LoadedSettings:
-    auth_key: str
-    refresh_account_interval_minute: int
 
 
 def _normalize_auth_key(value: object) -> str:
@@ -311,7 +312,15 @@ def _is_invalid_auth_key(value: object) -> bool:
     return _normalize_auth_key(value) == ""
 
 
-def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
+def _ensure_config_file(path: Path) -> None:
+    if path.exists():
+        return
+    if EXAMPLE_CONFIG_FILE.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(EXAMPLE_CONFIG_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def _read_yaml_object(path: Path, *, name: str) -> dict[str, object]:
     if not path.exists():
         return {}
     if path.is_dir():
@@ -321,58 +330,37 @@ def _read_json_object(path: Path, *, name: str) -> dict[str, object]:
         )
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def _load_settings() -> LoadedSettings:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    raw_config = _read_json_object(CONFIG_FILE, name="config.json")
-    auth_key = _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or raw_config.get("auth-key"))
-    if _is_invalid_auth_key(auth_key):
-        raise ValueError(
-            "❌ auth-key 未设置！\n"
-            "请在环境变量 CHATGPT2API_AUTH_KEY 中设置，或者在 config.json 中填写 auth-key。"
-        )
-
-    try:
-        refresh_interval = int(raw_config.get("refresh_account_interval_minute", 5))
-    except (TypeError, ValueError):
-        refresh_interval = 5
-
-    return LoadedSettings(
-        auth_key=auth_key,
-        refresh_account_interval_minute=refresh_interval,
-    )
+def _write_yaml_object(path: Path, data: dict[str, object]) -> None:
+    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
 class ConfigStore:
     def __init__(self, path: Path):
         self.path = path
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_config_file(self.path)
         self.data = self._load()
-        self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置！\n"
-                "请按以下任意一种方式解决：\n"
-                "1. 在 Render 的 Environment 变量中添加：\n"
-                "   CHATGPT2API_AUTH_KEY = your_real_auth_key\n"
-                "2. 或者在 config.json 中填写：\n"
-                '   "auth-key": "your_real_auth_key"'
+                "请在环境变量 CHATGPT2API_AUTH_KEY 中设置管理员密钥。"
             )
 
     def _load(self) -> dict[str, object]:
-        return _read_json_object(self.path, name="config.json")
+        return _read_yaml_object(self.path, name="config.yaml")
 
     def _save(self) -> None:
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _write_yaml_object(self.path, self.data)
 
     @property
     def auth_key(self) -> str:
-        return _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key"))
+        return _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY"))
 
     @property
     def accounts_file(self) -> Path:
@@ -469,24 +457,12 @@ class ConfigStore:
         return bool(value)
 
     @property
-    def auto_relogin_after_refresh(self) -> bool:
-        value = self.data.get("auto_relogin_after_refresh", False)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
-    @property
     def log_levels(self) -> list[str]:
         levels = self.data.get("log_levels")
         if not isinstance(levels, list):
             return []
         allowed = {"debug", "info", "warning", "error"}
         return [level for item in levels if (level := str(item or "").strip().lower()) in allowed]
-
-    @property
-    def sensitive_words(self) -> list[str]:
-        words = self.data.get("sensitive_words")
-        return [word for item in words if (word := str(item or "").strip())] if isinstance(words, list) else []
 
     @property
     def ai_review(self) -> dict[str, object]:
@@ -500,12 +476,6 @@ class ConfigStore:
     @property
     def images_dir(self) -> Path:
         path = DATA_DIR / "images"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    @property
-    def image_thumbnails_dir(self) -> Path:
-        path = DATA_DIR / "image_thumbnails"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -550,17 +520,14 @@ class ConfigStore:
         data["image_parallel_generation"] = self.image_parallel_generation
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
-        data["auto_relogin_after_refresh"] = self.auto_relogin_after_refresh
         data["log_levels"] = self.log_levels
-        data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
         data["global_system_prompt"] = self.global_system_prompt
-        data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data["proxy_runtime"] = self.get_public_proxy_runtime_settings()
         data["third_party_apps"] = self.get_third_party_apps_settings()
-        data.pop("auth-key", None)
+        data["codex_channels"] = self.get_codex_channels_settings()
         return data
 
     def get_proxy_settings(self) -> str:
@@ -584,11 +551,32 @@ class ConfigStore:
     def get_third_party_apps_settings(self) -> dict[str, object]:
         return _normalize_third_party_apps_settings(self.data.get("third_party_apps"))
 
+    def get_codex_channels_settings(self) -> dict[str, object]:
+        return _normalize_codex_channels_settings(self.data.get("codex_channels"))
+
+    def list_enabled_codex_channels(self) -> list[dict[str, object]]:
+        settings = self.get_codex_channels_settings()
+        channels = settings.get("channels") if isinstance(settings.get("channels"), list) else []
+        return [
+            dict(channel)
+            for channel in channels
+            if isinstance(channel, dict)
+               and _normalize_bool(channel.get("enabled"), False)
+               and str(channel.get("base_url") or "").strip()
+               and str(channel.get("api_key") or "").strip()
+               and str(channel.get("mapped_model") or "").strip()
+        ]
+
+    def get_codex_channel_for_model(self, model: object) -> dict[str, object] | None:
+        normalized = str(model or "").strip().lower()
+        for channel in self.list_enabled_codex_channels():
+            if str(channel.get("mapped_model") or "").strip().lower() == normalized:
+                return channel
+        return None
+
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
-        if "backup" in next_data:
-            next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:
             next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
             _validate_image_storage_settings(next_data["image_storage"])
@@ -598,6 +586,8 @@ class ConfigStore:
             )
         if "third_party_apps" in next_data:
             next_data["third_party_apps"] = _normalize_third_party_apps_settings(next_data.get("third_party_apps"))
+        if "codex_channels" in next_data:
+            next_data["codex_channels"] = _normalize_codex_channels_settings(next_data.get("codex_channels"))
         if "proxy_runtime" in next_data:
             incoming_runtime = next_data.get("proxy_runtime")
             if isinstance(incoming_runtime, dict):
@@ -607,36 +597,14 @@ class ConfigStore:
                     incoming_runtime["_existing_cf_cookies"] = previous_clearance.get("cf_cookies")
                     incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
             next_data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
-        next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
         return self.get()
-
-    def get_backup_settings(self) -> dict[str, object]:
-        return _normalize_backup_settings(self.data.get("backup"))
 
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))
 
     def get_chat_completion_cache_settings(self) -> dict[str, object]:
         return _normalize_chat_completion_cache_settings(self.data.get("chat_completion_cache"))
-
-    def get_storage_backend(self) -> StorageBackend:
-        """获取存储后端实例（单例）"""
-        if self._storage_backend is None:
-            from services.storage.factory import create_storage_backend
-            self._storage_backend = create_storage_backend(DATA_DIR)
-        return self._storage_backend
-
-
-def load_backup_state() -> dict[str, object]:
-    return _normalize_backup_state(_read_json_object(BACKUP_STATE_FILE, name="backup_state.json"))
-
-
-def save_backup_state(state: dict[str, object]) -> dict[str, object]:
-    normalized = _normalize_backup_state(state)
-    BACKUP_STATE_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return normalized
-
 
 config = ConfigStore(CONFIG_FILE)

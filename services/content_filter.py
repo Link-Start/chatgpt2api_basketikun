@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from curl_cffi import requests
+from utils.http_client import post
 from fastapi import HTTPException
 
 from services.config import config
@@ -151,10 +151,6 @@ def check_request(text: str) -> None:
     text = str(text or "")
     if not text.strip():
         return
-    # Local sensitive-word match runs on the raw text (cheap, no network).
-    for word in config.sensitive_words:
-        if word in text:
-            raise HTTPException(status_code=400, detail={"error": "检测到敏感词，拒绝本次任务"})
     review = config.ai_review
     if not review.get("enabled"):
         return
@@ -190,12 +186,12 @@ def check_request(text: str) -> None:
             )
 
     try:
-        response = requests.post(
+        response = post(
             f"{base_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": model, "messages": [{"role": "user", "content": content}], "temperature": 0},
             timeout=60,
-            **proxy_settings.build_session_kwargs(),
+            **proxy_settings.build_client_kwargs(),
         )
     except Exception as exc:
         _on_failure({

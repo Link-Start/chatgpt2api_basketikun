@@ -11,6 +11,7 @@ web_dist
 .idea
 data
 config.json
+config.yaml
 edit
 
 docker-compose-local.yml

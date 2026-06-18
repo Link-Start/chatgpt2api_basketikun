@@ -1,0 +1,154 @@
+# 账号刷新间隔，单位分钟。
+refresh_account_interval_minute: 5
+
+# 本地图片保留天数，超过后启动时会自动清理。
+image_retention_days: 15
+
+# 图片任务轮询上游结果的最长等待时间，单位秒。
+image_poll_timeout_secs: 120
+
+# 是否自动移除限流账号。一般不建议开启，避免误删临时限流账号。
+auto_remove_rate_limited_accounts: false
+
+# 是否自动移除已判定无效的账号。
+auto_remove_invalid_accounts: true
+
+# 控制台日志级别。
+log_levels:
+  - debug
+  - error
+  - info
+  - warning
+
+# 旧版全局代理。留空表示不使用。
+proxy: ""
+
+# 稳定代理运行时配置，主要用于 WARP / FlareSolverr 场景。
+proxy_runtime:
+  # 是否启用稳定代理运行时。
+  enabled: false
+
+  # 出口模式：direct 表示直连，single_proxy 表示统一走 proxy_url。
+  egress_mode: single_proxy
+
+  # 稳定代理地址，WARP compose 下默认指向 privoxy。
+  proxy_url: http://privoxy:8118
+
+  # 资源下载代理地址，留空时使用 proxy_url 或直连。
+  resource_proxy_url: ""
+
+  # 是否跳过上游 HTTPS 证书校验。
+  skip_ssl_verify: true
+
+  # 遇到这些 HTTP 状态码时重置会话状态。
+  reset_session_status_codes:
+    - 403
+
+  # Cloudflare clearance 配置。
+  clearance:
+    # 是否启用 clearance。
+    enabled: true
+
+    # clearance 模式：none、manual、flaresolverr。
+    mode: flaresolverr
+
+    # manual 模式下手动填写 Cookie。
+    cf_cookies: ""
+    cf_clearance: ""
+
+    # 请求 ChatGPT 时使用的浏览器 UA。
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
+    browser: chrome
+
+    # FlareSolverr 服务地址。
+    flaresolverr_url: http://flaresolverr:8191
+
+    # clearance 获取超时时间，单位秒。
+    timeout_sec: 60
+
+    # clearance 刷新间隔，单位秒。
+    refresh_interval: 3600
+
+    # 启动时是否预热 clearance。
+    warm_up_on_start: true
+
+# 对外访问基础地址，用于生成图片 URL。留空时按请求来源推断。
+base_url: ""
+
+# 每次请求注入的全局 system 指令。
+global_system_prompt: ""
+
+# AI 审核配置。关闭时不进行审核。
+ai_review:
+  enabled: false
+  base_url: ""
+  api_key: ""
+  model: ""
+  prompt: ""
+
+# 每个账号同时处理的图片请求数。
+image_account_concurrency: 3
+
+# 是否允许多账号并行处理图片任务。
+image_parallel_generation: true
+
+# 图片结果轮询间隔，单位秒。
+image_poll_interval_secs: 10
+
+# 图片任务创建后首次轮询前的等待时间，单位秒。
+image_poll_initial_wait_secs: 10
+
+# 图片文件外部存储配置。
+image_storage:
+  # false 表示只存本地。
+  enabled: false
+
+  # local：只本地；webdav：只 WebDAV；both：本地和 WebDAV 都保存。
+  mode: local
+  webdav_url: ""
+  webdav_username: ""
+  webdav_password: ""
+
+  # WebDAV 根目录。
+  webdav_root_path: chatgpt2api/images
+
+  # WebDAV 文件的公开访问地址前缀。
+  public_base_url: ""
+
+# 图片清理目标剩余空间，单位 MB。
+image_min_free_mb: 500
+
+# Chat Completions 缓存配置。
+chat_completion_cache:
+  enabled: true
+  ttl_seconds: 60
+  max_entries: 256
+  dedupe_inflight: true
+  stream_cache: true
+  normalize_messages: true
+  drop_adjacent_duplicates: true
+  drop_assistant_history: false
+
+# 图片二次确认机制。开启后找到图片后会等待一小段时间再确认。
+image_settle_enabled: false
+image_check_before_hit_enabled: false
+image_settle_secs: 2
+
+# 图片任务超时后点击继续等待的额外等待时间，单位秒。
+image_timeout_retry_secs: 30
+
+# 第三方入口配置。
+third_party_apps:
+  infinite_canvas:
+    enabled: true
+    url: https://canvas.best
+
+# Codex 生图渠道。用于接入中转站 API，通过 /v1/responses 调用 Codex 工具生图。
+codex_channels:
+  channels:
+    - enabled: false
+      name: 示例中转站
+      base_url: https://code.example.com/v1
+      api_key: ""
+      upstream_model: gpt-5.5
+      model_prefix: example

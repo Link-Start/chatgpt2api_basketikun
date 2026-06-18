@@ -12,7 +12,7 @@ const latestChangelogUrl =
   "https://raw.githubusercontent.com/basketikun/chatgpt2api/main/CHANGELOG.md";
 
 function readLocalReleases(): ReleaseInfo[] {
-  return JSON.parse(process.env.NEXT_PUBLIC_APP_RELEASES || "[]");
+  return JSON.parse(import.meta.env.VITE_APP_RELEASES || "[]");
 }
 
 function toVersionParts(version: string) {

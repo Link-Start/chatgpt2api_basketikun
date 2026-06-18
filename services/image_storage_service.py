@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from urllib.parse import quote, urlparse
 
-from curl_cffi import requests
+from utils.http_client import HttpClient
 from fastapi import HTTPException
 from PIL import Image
 
@@ -19,6 +19,7 @@ from services.config import DATA_DIR, config
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
 IMAGE_INDEX_LOCK = Lock()
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+THUMBNAIL_SUFFIX = "_thumbnail"
 
 
 class ImageStorageError(RuntimeError):
@@ -67,6 +68,11 @@ def _is_image_rel(path: str) -> bool:
     return Path(safe_rel).suffix.lower() in IMAGE_EXTENSIONS
 
 
+def _is_thumbnail_rel(path: str) -> bool:
+    item = Path(str(path))
+    return item.suffix.lower() == ".png" and item.stem.endswith(THUMBNAIL_SUFFIX)
+
+
 def _local_image_path(relative_path: str) -> Path:
     rel = _safe_relative_path(relative_path)
     root = config.images_dir.resolve()
@@ -101,7 +107,7 @@ class WebDAVClient:
         self.username = _clean(settings.get("webdav_username"))
         self.password = _clean(settings.get("webdav_password"))
         self.root_path = _clean(settings.get("webdav_root_path")).strip("/")
-        self.session = requests.Session()
+        self.session = HttpClient()
 
     def _auth_kwargs(self) -> dict[str, object]:
         return {"auth": (self.username, self.password)} if self.username or self.password else {}
@@ -274,7 +280,7 @@ class ImageStorageService:
             root = config.images_dir
             changed = False
             for path in root.rglob("*"):
-                if not path.is_file() or not _is_image_rel(path.name):
+                if not path.is_file() or not _is_image_rel(path.name) or _is_thumbnail_rel(path.name):
                     continue
                 rel = path.relative_to(root).as_posix()
                 if rel in indexed:
@@ -300,7 +306,7 @@ class ImageStorageService:
 
             items: list[dict[str, object]] = []
             for rel, item in list(indexed.items()):
-                if not _is_image_rel(rel):
+                if not _is_image_rel(rel) or _is_thumbnail_rel(rel):
                     indexed.pop(rel, None)
                     changed = True
                     continue
@@ -367,7 +373,7 @@ class ImageStorageService:
             items = self._load_clean_index()
             client = WebDAVClient(settings)
             for path in sorted(config.images_dir.rglob("*")):
-                if not path.is_file() or not _is_image_rel(path.name):
+                if not path.is_file() or not _is_image_rel(path.name) or _is_thumbnail_rel(path.name):
                     continue
                 rel = path.relative_to(config.images_dir).as_posix()
                 item = items.get(rel, {})

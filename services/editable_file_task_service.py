@@ -137,7 +137,7 @@ class EditableFileTaskService:
             token = _editable_access_token()
             account = account_service.get_account(token) or {}
             account_email = _clean(account.get("email"))
-            backend = OpenAIBackendAPI(token)
+            backend = OpenAIBackendAPI(account=account or {"access_token": token})
             output_dir = EDITABLE_FILE_ROOT / kind / key.rsplit(":", 1)[-1]
             result = backend.export_psd_zip(base64_images, prompt, output_dir) if kind == "psd" else backend.export_ppt_zip(base64_images, prompt, output_dir)
             account_service.mark_text_used(token)

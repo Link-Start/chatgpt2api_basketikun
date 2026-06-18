@@ -6,15 +6,15 @@ import json
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
-from curl_cffi.requests import Session
+from utils.http_client import HttpClient
 
 from services.account_service import account_service
 from services.config import DATA_DIR
+from utils.log import logger
 
 
 SUB2API_CONFIG_FILE = DATA_DIR / "sub2api_config.json"
@@ -184,7 +184,7 @@ _token_cache_lock = Lock()
 
 def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
     url = f"{base_url.rstrip('/')}/api/v1/auth/login"
-    session = Session(verify=True)
+    session = HttpClient(verify=True)
     try:
         response = session.post(
             url,
@@ -192,7 +192,7 @@ def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             timeout=30,
         )
-        if not response.ok:
+        if not response.is_success:
             raise RuntimeError(f"sub2api login failed: HTTP {response.status_code} {response.text[:200]}")
         payload = response.json()
     finally:
@@ -245,6 +245,34 @@ def _extract_access_token(credentials: object) -> str:
     return ""
 
 
+def _extract_credentials(account: dict) -> dict:
+    for key in ("credentials", "credential", "data"):
+        value = account.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _account_platform(account: dict, credentials: dict) -> str:
+    return (_clean(account.get("platform")) or _clean(credentials.get("platform"))).lower()
+
+
+def _account_type(account: dict, credentials: dict) -> str:
+    return (_clean(account.get("type")) or _clean(account.get("account_type")) or _clean(credentials.get("type"))).lower()
+
+
+def _looks_like_openai_account(account: dict, credentials: dict) -> bool:
+    if _extract_access_token(credentials):
+        return True
+    platform = _account_platform(account, credentials)
+    if platform and "openai" not in platform and "chatgpt" not in platform:
+        return False
+    account_type = _account_type(account, credentials)
+    if account_type and not any(item in account_type for item in ("oauth", "chatgpt", "openai", "token")):
+        return False
+    return True
+
+
 def _unwrap_envelope(payload: object) -> object:
     """Peel sub2api's `{code, message, data}` envelope, returning the inner `data` field
     when present. Also handles unwrapped responses from older/alt versions."""
@@ -278,43 +306,71 @@ def list_remote_accounts(server: dict) -> list[dict]:
     headers = _auth_headers(server)
     group_id = _clean(server.get("group_id"))
 
-    session = Session(verify=True)
+    session = HttpClient(verify=True)
     items: list[dict] = []
     try:
         page = 1
         while True:
             params: dict[str, object] = {
-                "platform": "openai",
-                "type": "oauth",
                 "page": page,
                 "page_size": 200,
             }
             if group_id:
                 params["group"] = group_id
+            logger.info({
+                "event": "sub2api_list_accounts_request",
+                "server": _clean(server.get("name")) or base_url,
+                "page": page,
+                "group_id": group_id,
+            })
             response = session.get(
                 f"{base_url.rstrip('/')}/api/v1/admin/accounts",
                 headers=headers,
                 params=params,
                 timeout=30,
             )
-            if not response.ok:
+            if not response.is_success:
                 raise RuntimeError(f"sub2api list failed: HTTP {response.status_code} {response.text[:200]}")
             payload = response.json()
 
             data, total = _extract_paged_items(payload)
+            logger.info({
+                "event": "sub2api_list_accounts_response",
+                "server": _clean(server.get("name")) or base_url,
+                "page": page,
+                "items": len(data),
+                "total": total,
+            })
             if not data:
                 break
 
             for account in data:
                 if not isinstance(account, dict):
                     continue
-                credentials = account.get("credentials") if isinstance(account.get("credentials"), dict) else {}
+                credentials = _extract_credentials(account)
+                if not _looks_like_openai_account(account, credentials):
+                    continue
                 access_token = _extract_access_token(credentials)
                 if not access_token:
-                    continue
+                    logger.info({
+                        "event": "sub2api_account_without_list_token",
+                        "account_id": account.get("id"),
+                        "name": account.get("name"),
+                    })
                 account_id = account.get("id")
+                normalized_id = str(account_id) if account_id is not None else (
+                    _clean(credentials.get("chatgpt_account_id"))
+                    or _clean(credentials.get("account_id"))
+                    or _clean(credentials.get("id"))
+                )
+                if not normalized_id:
+                    logger.info({
+                        "event": "sub2api_account_without_id",
+                        "name": account.get("name"),
+                    })
+                    continue
                 items.append({
-                    "id": str(account_id) if account_id is not None else _clean(credentials.get("chatgpt_account_id")),
+                    "id": normalized_id,
                     "name": _clean(account.get("name")),
                     "email": _clean(credentials.get("email")) or _clean(account.get("name")),
                     "plan_type": _clean(credentials.get("plan_type")),
@@ -329,6 +385,11 @@ def list_remote_accounts(server: dict) -> list[dict]:
     finally:
         session.close()
 
+    logger.info({
+        "event": "sub2api_list_accounts_done",
+        "server": _clean(server.get("name")) or base_url,
+        "accounts": len(items),
+    })
     return items
 
 
@@ -340,7 +401,7 @@ def list_remote_groups(server: dict) -> list[dict]:
 
     headers = _auth_headers(server)
 
-    session = Session(verify=True)
+    session = HttpClient(verify=True)
     items: list[dict] = []
     try:
         page = 1
@@ -354,7 +415,7 @@ def list_remote_groups(server: dict) -> list[dict]:
                 },
                 timeout=30,
             )
-            if not response.ok:
+            if not response.is_success:
                 raise RuntimeError(f"sub2api groups failed: HTTP {response.status_code} {response.text[:200]}")
             payload = response.json()
 
@@ -387,35 +448,45 @@ def list_remote_groups(server: dict) -> list[dict]:
     return items
 
 
-def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str, dict]:
-    """Return (access_token, account_meta) for a single sub2api account id."""
+def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> list[str]:
+    """Return access_tokens for sub2api account ids."""
     base_url = _clean(server.get("base_url"))
     headers = _auth_headers(server)
 
-    session = Session(verify=True)
+    session = HttpClient(verify=True)
     try:
         response = session.get(
-            f"{base_url.rstrip('/')}/api/v1/admin/accounts/{account_id}",
+            f"{base_url.rstrip('/')}/api/v1/admin/accounts/data",
             headers=headers,
+            params={
+                "ids": ",".join(account_ids),
+                "timezone": "Asia/Shanghai",
+            },
             timeout=30,
         )
-        if not response.ok:
+        if not response.is_success:
             raise RuntimeError(f"HTTP {response.status_code}")
         payload = response.json()
     finally:
         session.close()
 
-    account = _unwrap_envelope(payload)
-    if not isinstance(account, dict):
-        account = payload if isinstance(payload, dict) else {}
-    credentials = account.get("credentials") if isinstance(account.get("credentials"), dict) else {}
-    access_token = _extract_access_token(credentials)
-    if not access_token:
+    data = _unwrap_envelope(payload)
+    accounts = data.get("accounts") if isinstance(data, dict) else []
+    if not isinstance(accounts, list):
+        accounts = []
+
+    tokens: list[str] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        credentials = _extract_credentials(account)
+        access_token = _extract_access_token(credentials)
+        if access_token:
+            tokens.append(access_token)
+
+    if not tokens:
         raise RuntimeError("missing access_token")
-    return access_token, {
-        "email": _clean(credentials.get("email")),
-        "plan_type": _clean(credentials.get("plan_type")),
-    }
+    return tokens
 
 
 class Sub2APIImportService:
@@ -472,28 +543,18 @@ class Sub2APIImportService:
     def _run_import(self, server_id: str, server: dict, account_ids: list[str]) -> None:
         self._update_job(server_id, status="running")
 
-        tokens: list[str] = []
-        max_workers = min(8, max(1, len(account_ids)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(_fetch_access_token_for_account, server, account_id): account_id
-                for account_id in account_ids
-            }
-            for future in as_completed(future_map):
-                account_id = future_map[future]
-                try:
-                    token, _meta = future.result()
-                    tokens.append(token)
-                except Exception as exc:
-                    self._append_error(server_id, account_id, str(exc) or "unknown error")
+        try:
+            tokens = _fetch_access_tokens_for_accounts(server, account_ids)
+        except Exception as exc:
+            self._append_error(server_id, ",".join(account_ids), str(exc) or "unknown error")
+            tokens = []
 
-                current = self._config.get_import_job(server_id) or {}
-                failed = len(current.get("errors") or [])
-                self._update_job(
-                    server_id,
-                    completed=int(current.get("completed") or 0) + 1,
-                    failed=failed,
-                )
+        current = self._config.get_import_job(server_id) or {}
+        self._update_job(
+            server_id,
+            completed=len(account_ids),
+            failed=len(current.get("errors") or []),
+        )
 
         if not tokens:
             current = self._config.get_import_job(server_id) or {}

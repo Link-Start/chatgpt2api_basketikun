@@ -1,19 +1,23 @@
-import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-ROOT_CONFIG_FILE = ROOT_DIR / "config.json"
+ROOT_CONFIG_FILE = ROOT_DIR / "config.yaml"
 
 
 class ConfigLoadingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._created_root_config = False
+        cls._old_auth_key = os.environ.get("CHATGPT2API_AUTH_KEY")
+        os.environ["CHATGPT2API_AUTH_KEY"] = "test-auth"
         if not ROOT_CONFIG_FILE.exists():
-            ROOT_CONFIG_FILE.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            ROOT_CONFIG_FILE.write_text(yaml.safe_dump({}), encoding="utf-8")
             cls._created_root_config = True
 
         from services import config as config_module
@@ -24,12 +28,16 @@ class ConfigLoadingTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         if cls._created_root_config and ROOT_CONFIG_FILE.exists():
             ROOT_CONFIG_FILE.unlink()
+        if cls._old_auth_key is None:
+            os.environ.pop("CHATGPT2API_AUTH_KEY", None)
+        else:
+            os.environ["CHATGPT2API_AUTH_KEY"] = cls._old_auth_key
 
-    def test_load_settings_ignores_directory_config_path(self) -> None:
+    def test_config_store_ignores_directory_config_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             base_dir = Path(tmp_dir)
             data_dir = base_dir / "data"
-            config_dir = base_dir / "config.json"
+            config_dir = base_dir / "config.yaml"
             os_auth_key = "env-auth"
 
             config_dir.mkdir()
@@ -45,10 +53,10 @@ class ConfigLoadingTests(unittest.TestCase):
                 module.CONFIG_FILE = config_dir
                 module.os.environ["CHATGPT2API_AUTH_KEY"] = os_auth_key
 
-                settings = module._load_settings()
+                store = module.ConfigStore(config_dir)
 
-                self.assertEqual(settings.auth_key, os_auth_key)
-                self.assertEqual(settings.refresh_account_interval_minute, 5)
+                self.assertEqual(store.auth_key, os_auth_key)
+                self.assertEqual(store.refresh_account_interval_minute, 5)
             finally:
                 module.BASE_DIR = old_base_dir
                 module.DATA_DIR = old_data_dir

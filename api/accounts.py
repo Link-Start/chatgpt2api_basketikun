@@ -32,6 +32,7 @@ from services.sub2api_service import (
     sub2api_config,
     sub2api_import_service,
 )
+from utils.log import logger
 
 
 
@@ -275,34 +276,6 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "progress not found"})
         return progress
 
-    @router.post("/api/accounts/re-login")
-    async def re_login_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
-        """对选中账号执行密码重新登录流程（密码登录→验证码登录→刷新token）。"""
-        require_admin(authorization)
-        access_tokens = [str(token or "").strip() for token in body.access_tokens if str(token or "").strip()]
-        if not access_tokens:
-            raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-
-        progress_id = str(uuid.uuid4())
-
-        async def _do_relogin():
-            try:
-                await run_in_threadpool(account_service.re_login_accounts, access_tokens, progress_id)
-            except Exception as e:
-                account_service.finish_relogin_progress(progress_id, error=str(e))
-
-        asyncio.create_task(_do_relogin())
-
-        return {"progress_id": progress_id}
-
-    @router.get("/api/accounts/re-login/progress/{progress_id}")
-    async def get_relogin_progress(progress_id: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        progress = account_service.get_relogin_progress(progress_id)
-        if progress is None:
-            raise HTTPException(status_code=404, detail={"error": "progress not found"})
-        return progress
-
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -509,9 +482,12 @@ def create_router() -> APIRouter:
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
         try:
+            logger.info({"event": "sub2api_accounts_api_start", "server_id": server_id, "server": server.get("name") or server.get("base_url")})
             accounts = await run_in_threadpool(sub2api_list_remote_accounts, server)
         except Exception as exc:
+            logger.error({"event": "sub2api_accounts_api_failed", "server_id": server_id, "error": str(exc)})
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+        logger.info({"event": "sub2api_accounts_api_done", "server_id": server_id, "accounts": len(accounts)})
         return {"server_id": server_id, "accounts": accounts}
 
     @router.post("/api/sub2api/servers/{server_id}/import")

@@ -1,7 +1,7 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { LoaderCircle, LockKeyhole } from "lucide-react";
 import { toast } from "sonner";
 
@@ -14,7 +14,7 @@ import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
 import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
 
 export default function LoginPage() {
-  const router = useRouter();
+  const navigate = useNavigate();
   const [authKey, setAuthKey] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { isCheckingAuth } = useRedirectIfAuthenticated();
@@ -35,7 +35,7 @@ export default function LoginPage() {
         subjectId: data.subject_id,
         name: data.name,
       });
-      router.replace(getDefaultRouteForRole(data.role));
+      navigate(getDefaultRouteForRole(data.role), { replace: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : "登录失败";
       toast.error(message);

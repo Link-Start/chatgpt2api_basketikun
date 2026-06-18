@@ -9,11 +9,9 @@ import {
   ChevronRight,
   CircleAlert,
   CircleOff,
-  Copy,
   Download,
   Link2,
   LoaderCircle,
-  LogIn,
   Pencil,
   RefreshCw,
   Search,
@@ -45,21 +43,18 @@ import {
 import {
   deleteAccounts,
   fetchAccounts,
-  fetchModels,
   fetchRefreshProgress,
-  fetchReLoginProgress,
-  reLoginAccounts,
   refreshAccounts,
   testProxy,
   updateAccount,
   type Account,
   type AccountRefreshResponse,
   type AccountStatus,
-  type Model,
   type RefreshProgressResponse,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
+import { SystemModels } from "@/components/system-models";
 
 import { AccountImportDialog } from "./components/account-import-dialog";
 
@@ -69,6 +64,21 @@ const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = 
   { label: "限流", value: "限流" },
   { label: "异常", value: "异常" },
   { label: "禁用", value: "禁用" },
+];
+
+type AccountSortKey = "inflight" | "quota" | "success" | "fail";
+type SortOrder = "desc" | "asc";
+
+const accountSortOptions: { label: string; value: AccountSortKey }[] = [
+  { label: "按并发", value: "inflight" },
+  { label: "按额度", value: "quota" },
+  { label: "按成功", value: "success" },
+  { label: "按失败", value: "fail" },
+];
+
+const sortOrderOptions: { label: string; value: SortOrder }[] = [
+  { label: "倒序", value: "desc" },
+  { label: "正序", value: "asc" },
 ];
 
 const statusMeta: Record<
@@ -118,6 +128,34 @@ function formatQuota(account: Account) {
   return String(Math.max(0, account.quota));
 }
 
+function getQuotaSortValue(account: Account) {
+  if (isUnlimitedImageQuotaAccount(account)) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  if (imageQuotaUnknown(account)) {
+    return -1;
+  }
+  return Math.max(0, account.quota);
+}
+
+function getAccountSortValue(account: Account, sortBy: AccountSortKey) {
+  if (sortBy === "inflight") {
+    return account.image_inflight ?? 0;
+  }
+  if (sortBy === "quota") {
+    return getQuotaSortValue(account);
+  }
+  return account[sortBy] ?? 0;
+}
+
+function formatSuccessRate(account: Account) {
+  const total = account.success + account.fail;
+  if (total <= 0) {
+    return "—";
+  }
+  return `${Math.round((account.success / total) * 100)}%`;
+}
+
 function formatRestoreAt(value?: string | null) {
   if (!value) {
     return { absolute: "—", relative: "" };
@@ -153,12 +191,6 @@ function formatQuotaSummary(accounts: Account[]) {
   return formatCompact(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
-function maskToken(token?: string) {
-  if (!token) return "—";
-  if (token.length <= 18) return token;
-  return `${token.slice(0, 16)}...${token.slice(-8)}`;
-}
-
 function downloadTokens(accounts: Account[]) {
   const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
@@ -185,14 +217,33 @@ function displayAccountSource(account: Account) {
   return source;
 }
 
+function formatAccountDate(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+
+  const date = new Date(value.endsWith("Z") ? value : `${value}Z`);
+  if (Number.isNaN(date.getTime())) {
+    return String(value).slice(0, 16);
+  }
+
+  return date.toLocaleDateString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [availableModels, setAvailableModels] = useState<Model[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
+  const [sortBy, setSortBy] = useState<AccountSortKey>("inflight");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
@@ -200,12 +251,10 @@ function AccountsPageContent() {
   const [editProxy, setEditProxy] = useState("");
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshingTokens, setRefreshingTokens] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
-  const [isRelogining, setIsRelogining] = useState(false);
   const [progress, setProgress] = useState<{
     visible: boolean;
     current: number;
@@ -240,26 +289,12 @@ function AccountsPageContent() {
     }
   };
 
-  const loadModels = async () => {
-    setIsLoadingModels(true);
-    try {
-      const data = await fetchModels();
-      setAvailableModels(Array.isArray(data.data) ? data.data : []);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "加载模型列表失败";
-      toast.error(message);
-    } finally {
-      setIsLoadingModels(false);
-    }
-  };
-
   useEffect(() => {
     if (didLoadRef.current) {
       return;
     }
     didLoadRef.current = true;
     void loadAccounts();
-    void loadModels();
 
     // 清理进度条定时器
     return () => {
@@ -278,10 +313,22 @@ function AccountsPageContent() {
     });
   }, [accounts, query, statusFilter, typeFilter]);
 
+  const sortedAccounts = useMemo(() => {
+    const direction = sortOrder === "desc" ? -1 : 1;
+    return [...filteredAccounts].sort((left, right) => {
+      const leftValue = getAccountSortValue(left, sortBy);
+      const rightValue = getAccountSortValue(right, sortBy);
+      if (leftValue === rightValue) {
+        return (left.email ?? "").localeCompare(right.email ?? "");
+      }
+      return (leftValue - rightValue) * direction;
+    });
+  }, [filteredAccounts, sortBy, sortOrder]);
+
   const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
   const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
+  const currentRows = sortedAccounts.slice(startIndex, startIndex + Number(pageSize));
   const allCurrentSelected =
     currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.access_token));
 
@@ -467,49 +514,14 @@ function AccountsPageContent() {
       setAccounts(data.items);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
 
-      const relogined = data.relogined ?? 0;
-
-      // 显示重新登录进度
-      if (relogined > 0) {
-        setProgress({
-          visible: true,
-          current: 0,
-          total: relogined,
-          message: `正在尝试对 ${relogined} 个账号进行移除异常状态`,
-          email: "",
-        });
-        // 模拟重新登录进度
-        let reCount = 0;
-        await new Promise<void>((resolve) => {
-          const timer = setInterval(() => {
-            reCount += 1;
-            if (reCount >= relogined) {
-              clearInterval(timer);
-              setProgress({
-                visible: true,
-                current: relogined,
-                total: relogined,
-                message: "移除异常状态完成",
-                email: "",
-              });
-              setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-              resolve();
-            } else {
-              setProgress((prev) => ({ ...prev, current: reCount }));
-            }
-          }, 150);
-          setTimeout(resolve, 2000);
-        });
-      } else {
-        setProgress({
-          visible: true,
-          current: total,
-          total,
-          message: "刷新完成",
-          email: "",
-        });
-        setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-      }
+      setProgress({
+        visible: true,
+        current: total,
+        total,
+        message: "刷新完成",
+        email: "",
+      });
+      setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
 
       if ((data.errors ?? []).length > 0) {
         const firstError = data.errors?.[0]?.error;
@@ -517,7 +529,7 @@ function AccountsPageContent() {
           `刷新成功 ${data.refreshed} 个，失败 ${(data.errors ?? []).length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户${relogined > 0 ? `，已触发 ${relogined} 个账号重新登录` : ""}`);
+        toast.success(`刷新成功 ${data.refreshed} 个账户`);
       }
     } catch (error) {
       setProgress({ visible: false, current: 0, total: 0, message: "", email: "" });
@@ -552,131 +564,6 @@ function AccountsPageContent() {
         }
       }, 500);
     });
-  };
-
-  const handleReLogin = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
-      toast.error("请先选择要恢复的账户");
-      return;
-    }
-
-    // 只处理异常账号，过滤非异常账号
-    const abnormalTokens = accessTokens.filter((token) => {
-      const account = accounts.find((a) => a.access_token === token);
-      return account?.status === "异常";
-    });
-
-    if (abnormalTokens.length === 0) {
-      toast.error("选中账号中没有异常账号");
-      return;
-    }
-
-    if (abnormalTokens.length < accessTokens.length) {
-      toast.info(`已过滤 ${accessTokens.length - abnormalTokens.length} 个非异常账号`);
-    }
-
-    setIsRelogining(true);
-
-    // 计算非选中账号的基数（统计卡片联动用）
-    const selectedTokenSet = new Set(abnormalTokens);
-    const baseAccountsList = accounts.filter((a) => !selectedTokenSet.has(a.access_token));
-    const baseActive = baseAccountsList.filter((a) => a.status === "正常").length;
-    const baseLimited = baseAccountsList.filter((a) => a.status === "限流").length;
-    const baseAbnormal = baseAccountsList.filter((a) => a.status === "异常").length;
-    const baseDisabled = baseAccountsList.filter((a) => a.status === "禁用").length;
-
-    // 显示进度条（真实进度）
-    const total = abnormalTokens.length;
-    setProgress({ visible: true, current: 0, total, message: "正在尝试恢复异常账号...", email: "" });
-
-    try {
-      const { progress_id } = await reLoginAccounts(abnormalTokens);
-
-      // 轮询进度到完成
-      await new Promise<void>((resolve, reject) => {
-        const pollTimer = setInterval(async () => {
-          try {
-            const p = await fetchReLoginProgress(progress_id);
-            if (p.done) {
-              clearInterval(pollTimer);
-              if (p.error) {
-                reject(new Error(p.error));
-                return;
-              }
-              setProgress((prev) => ({ ...prev, current: prev.total, message: "恢复流程已完成" }));
-              setRefreshSummary(null);
-              resolve();
-            } else {
-              // 实时更新进度
-              const results = p.results ?? [];
-              // 找到最新一条有错误的结果
-              const lastErrorResult = [...results].reverse().find((r) => r.error);
-              const emailHint = lastErrorResult
-                ? `失败: ${lastErrorResult.token} ${lastErrorResult.error ?? ""}`
-                : `已处理 ${p.processed}/${p.total}`;
-              setProgress((prev) => ({
-                ...prev,
-                current: p.processed,
-                email: emailHint,
-                message: "正在尝试恢复异常账号...",
-              }));
-
-              // 实时更新统计卡片：基数 + 已处理的恢复结果
-              let runningActive = baseActive;
-              let runningAbnormal = baseAbnormal;
-              let runningDisabled = baseDisabled;
-              for (const r of results) {
-                if (r.status === "成功") {
-                  runningActive += 1;
-                  runningAbnormal -= 1;
-                } else if (r.status === "禁用") {
-                  runningDisabled += 1;
-                  runningAbnormal -= 1;
-                }
-                // "异常"或"跳过"：保持异常状态不变
-              }
-              setRefreshSummary({
-                total: accounts.length,
-                active: runningActive,
-                limited: baseLimited,
-                abnormal: runningAbnormal,
-                disabled: runningDisabled,
-                quota: summary.quota,
-              });
-            }
-          } catch (err) {
-            clearInterval(pollTimer);
-            reject(err);
-          }
-        }, 300);
-      });
-
-      // 等待后台线程完成，再拉取最新数据
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
-      try {
-        const freshData = await fetchAccounts();
-        setAccounts(freshData.items);
-        setSelectedIds((prev) => prev.filter((id) => freshData.items.some((item) => item.access_token === id)));
-      } catch { /* 静默失败 */ }
-
-      setProgress({
-        visible: true,
-        current: total,
-        total,
-        message: "恢复完成",
-        email: "",
-      });
-      setTimeout(() => setProgress({ visible: false, current: 0, total: 0, message: "", email: "" }), 800);
-
-      toast.success(`恢复流程已全部完成`);
-    } catch (error) {
-      setProgress({ visible: false, current: 0, total: 0, message: "", email: "" });
-      setRefreshSummary(null);
-      const message = error instanceof Error ? error.message : "重新登录失败";
-      toast.error(message);
-    } finally {
-      setIsRelogining(false);
-    }
   };
 
   const openEditDialog = (account: Account) => {
@@ -737,50 +624,12 @@ function AccountsPageContent() {
 
   return (
     <>
-      <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+      <section className="flex flex-col gap-4">
         <div className="space-y-1">
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">
             Account Pool
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">号池管理</h1>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
-            disabled={isLoading || isRefreshing || isDeleting}
-          >
-            <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
-            刷新
-          </Button>
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
-          >
-            <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
-            一键刷新所有账号信息和额度
-          </Button>
-          <AccountImportDialog
-            disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              setAccounts(items);
-              setSelectedIds([]);
-              setPage(1);
-            }}
-          />
-          <Button
-            variant="outline"
-            className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadTokens(accounts)}
-            disabled={accounts.length === 0}
-          >
-            <Download className="size-4" />
-            导出全部 Token
-          </Button>
         </div>
       </section>
 
@@ -897,42 +746,7 @@ function AccountsPageContent() {
             );
           })}
         </div>
-        <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-          <CardContent className="p-4">
-            <div className="mb-3 text-sm font-medium text-stone-700">
-              系统可用模型
-              <span className="ml-1 text-stone-400">({availableModels.length})</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {availableModels.length > 0 ? (
-                availableModels.map((model) => (
-                  <button
-                    key={model.id}
-                    type="button"
-                    className="inline-flex cursor-pointer items-center rounded-full border border-stone-200 bg-white px-2.5 py-1 text-xs font-medium text-stone-700 transition hover:border-stone-300 hover:bg-stone-50"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(model.id);
-                      toast.success("模型名已复制");
-                    }}
-                    title={`点击复制 ${model.id}`}
-                  >
-                    <img
-                      src="/openai.svg"
-                      alt=""
-                      aria-hidden="true"
-                      className="mr-1.5 size-3.5 shrink-0"
-                    />
-                    {model.id}
-                  </button>
-                ))
-              ) : isLoadingModels ? (
-                <span className="text-sm text-stone-400">正在加载模型列表...</span>
-              ) : (
-                <span className="text-sm text-stone-400">当前暂无可用模型</span>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        <SystemModels />
       </section>
 
       <section className="space-y-4">
@@ -993,6 +807,42 @@ function AccountsPageContent() {
                 ))}
               </SelectContent>
             </Select>
+            <Select
+              value={sortBy}
+              onValueChange={(value) => {
+                setSortBy(value as AccountSortKey);
+                setPage(1);
+              }}
+            >
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[120px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {accountSortOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={sortOrder}
+              onValueChange={(value) => {
+                setSortOrder(value as SortOrder);
+                setPage(1);
+              }}
+            >
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[100px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {sortOrderOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
@@ -1017,7 +867,7 @@ function AccountsPageContent() {
           )}
         >
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
               <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
                 <Button
                   variant="ghost"
@@ -1027,16 +877,6 @@ function AccountsPageContent() {
                 >
                   {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   刷新选中账号信息和额度
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="h-8 rounded-lg px-3 text-amber-600 hover:bg-amber-50 hover:text-amber-700"
-                  onClick={() => void handleReLogin(selectedTokens)}
-                  disabled={selectedTokens.length === 0 || isRelogining}
-                  title="尝试密码登录恢复账号"
-                >
-                  {isRelogining ? <LoaderCircle className="size-4 animate-spin" /> : <LogIn className="size-4" />}
-                  尝试恢复异常账号
                 </Button>
                 <Button
                   variant="ghost"
@@ -1062,10 +902,50 @@ function AccountsPageContent() {
                   </span>
                 ) : null}
               </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-2.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+                  onClick={() => void loadAccounts()}
+                  disabled={isLoading || isRefreshing || isDeleting}
+                >
+                  <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
+                  刷新
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-2.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+                  onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
+                  disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
+                >
+                  <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                  一键刷新所有账号信息和额度
+                </Button>
+                <AccountImportDialog
+                  disabled={isLoading || isRefreshing || isDeleting}
+                  triggerVariant="ghost"
+                  triggerClassName="h-8 rounded-lg px-2.5"
+                  onImported={(items) => {
+                    setAccounts(items);
+                    setSelectedIds([]);
+                    setPage(1);
+                  }}
+                />
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-2.5 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+                  onClick={() => downloadTokens(accounts)}
+                  disabled={accounts.length === 0}
+                >
+                  <Download className="size-4" />
+                  导出全部 Token
+                </Button>
+              </div>
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1000px] text-left">
+              <table className="w-full min-w-[1040px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
                     <th className="w-12 px-4 py-3">
@@ -1074,17 +954,16 @@ function AccountsPageContent() {
                         onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
                       />
                     </th>
-                    <th className="w-56 px-4 py-3">token</th>
+                    <th className="w-64 px-4 py-3">邮箱</th>
                     <th className="w-28 px-4 py-3">类型</th>
                     <th className="w-24 px-4 py-3">来源</th>
                     <th className="w-24 px-4 py-3">状态</th>
-                    <th className="w-56 px-4 py-3">账号信息</th>
-                    <th className="w-32 px-4 py-3">创建时间</th>
                     <th className="w-24 px-4 py-3">额度</th>
-                    <th className="w-40 px-4 py-3">恢复时间</th>
-                    <th className="w-18 px-4 py-3">在途</th>
+                    <th className="w-18 px-4 py-3">并发</th>
                     <th className="w-18 px-4 py-3">成功</th>
                     <th className="w-18 px-4 py-3">失败</th>
+                    <th className="w-20 px-4 py-3">成功率</th>
+                    <th className="w-48 px-4 py-3">创建/恢复时间</th>
                     <th className="w-24 px-4 py-3">操作</th>
                   </tr>
                 </thead>
@@ -1111,20 +990,8 @@ function AccountsPageContent() {
                           />
                         </td>
                         <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium tracking-tight text-stone-700">
-                              {maskToken(account.access_token)}
-                            </span>
-                            <button
-                              type="button"
-                              className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
-                                toast.success("token 已复制");
-                              }}
-                            >
-                              <Copy className="size-4" />
-                            </button>
+                          <div className="max-w-[240px] truncate font-medium tracking-tight text-stone-700">
+                            {account.email ?? "—"}
                           </div>
                         </td>
                         <td className="px-4 py-3">
@@ -1147,34 +1014,9 @@ function AccountsPageContent() {
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
-                        </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                          {(() => {
-                            const raw = (account as any).created_at;
-                            if (!raw) return "—";
-                            try {
-                              const d = new Date(raw + "Z");
-                              if (isNaN(d.getTime())) return String(raw).slice(0, 10);
-                              return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-                            } catch { return String(raw).slice(0, 10); }
-                          })()}
-                        </td>
-                        <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">
                             {formatQuota(account)}
                           </Badge>
-                        </td>
-                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
-                          {(() => {
-                            const restore = formatRestoreAt(account.restore_at);
-                            return (
-                              <div className="space-y-0.5">
-                                {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
-                                <div>{restore.absolute}</div>
-                              </div>
-                            );
-                          })()}
                         </td>
                         <td className="px-4 py-3">
                           {(() => {
@@ -1189,7 +1031,7 @@ function AccountsPageContent() {
                                 title={
                                   inflight > 0
                                     ? "当前正在生成的图片数。号池空闲时此值持续 > 0，说明并发槽位泄漏、该账号已被静默排除出调度"
-                                    : "当前无在途生图任务"
+                                    : "当前无并发生图任务"
                                 }
                               >
                                 {inflight}
@@ -1199,6 +1041,24 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3 text-stone-500">{account.success}</td>
                         <td className="px-4 py-3 text-stone-500">{account.fail}</td>
+                        <td className="px-4 py-3 text-stone-500">{formatSuccessRate(account)}</td>
+                        <td className="px-4 py-3 text-xs leading-5 text-stone-500">
+                          {(() => {
+                            const restore = formatRestoreAt(account.restore_at);
+                            return (
+                              <div className="space-y-0.5">
+                                <div>
+                                  <span className="text-stone-400">创建 </span>
+                                  {formatAccountDate(account.created_at)}
+                                </div>
+                                <div>
+                                  <span className="text-stone-400">恢复 </span>
+                                  <span title={restore.relative || undefined}>{restore.absolute}</span>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-1 text-stone-400">
                             <button

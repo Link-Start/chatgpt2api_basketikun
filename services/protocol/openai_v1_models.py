@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from services.account_service import account_service
+from services.config import config
 from services.openai_backend_api import OpenAIBackendAPI
 from utils.helper import CODEX_IMAGE_MODEL
 
@@ -38,6 +39,10 @@ def list_models() -> dict[str, Any]:
         dynamic_models.add(f"team-{CODEX_IMAGE_MODEL}")
     if "Pro" in codex_types:
         dynamic_models.add(f"pro-{CODEX_IMAGE_MODEL}")
+    for channel in config.list_enabled_codex_channels():
+        mapped_model = str(channel.get("mapped_model") or "").strip()
+        if mapped_model:
+            dynamic_models.add(mapped_model)
 
     for model in sorted(dynamic_models):
         if model not in seen:

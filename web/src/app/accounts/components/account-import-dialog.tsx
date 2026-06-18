@@ -1,7 +1,7 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useRef, useState, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent, type ComponentProps } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   Copy,
@@ -42,6 +42,8 @@ type ImportMethod = "menu" | "token" | "session" | "codex-auth" | "cpa" | "oauth
 
 type AccountImportDialogProps = {
   disabled?: boolean;
+  triggerClassName?: string;
+  triggerVariant?: ComponentProps<typeof Button>["variant"];
   onImported: (items: Account[]) => void;
 };
 
@@ -155,8 +157,13 @@ function MethodCard({
   );
 }
 
-export function AccountImportDialog({ disabled, onImported }: AccountImportDialogProps) {
-  const router = useRouter();
+export function AccountImportDialog({
+  disabled,
+  triggerClassName,
+  triggerVariant = "default",
+  onImported,
+}: AccountImportDialogProps) {
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [method, setMethod] = useState<ImportMethod>("menu");
   const [tokenInput, setTokenInput] = useState("");
@@ -725,7 +732,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           onClick={() => {
             setOpen(false);
             resetState();
-            router.push("/settings");
+            navigate("/settings");
           }}
         />
         <MethodCard
@@ -735,7 +742,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
           onClick={() => {
             setOpen(false);
             resetState();
-            router.push("/settings");
+            navigate("/settings");
           }}
         />
       </div>
@@ -748,7 +755,13 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     <>
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <Button
-          className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+          variant={triggerVariant}
+          className={cn(
+            triggerVariant === "ghost"
+              ? "h-10 rounded-xl px-3 text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+              : "h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800",
+            triggerClassName,
+          )}
           onClick={() => setOpen(true)}
           disabled={disabled}
         >

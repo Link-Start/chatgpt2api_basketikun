@@ -13,10 +13,11 @@ from PIL import Image, ImageOps
 
 from services.config import config
 from services.image_storage_service import image_storage_service
-from services.image_tags_service import load_tags, remove_tags
 from utils.log import logger
 
 THUMBNAIL_SIZE = (320, 320)
+THUMBNAIL_SUFFIX = "_thumbnail"
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 
 def _cleanup_empty_dirs(root: Path) -> None:
@@ -56,6 +57,11 @@ def get_image_response(relative_path: str) -> FileResponse | Response:
         "Access-Control-Allow-Methods": "GET, OPTIONS",
         "Access-Control-Allow-Headers": "*",
     }
+    if _is_thumbnail_path(relative_path):
+        source = next((item for item in _source_candidates_for_thumbnail(relative_path) if image_storage_service.exists(item)), "")
+        if not source:
+            raise HTTPException(status_code=404, detail="image not found")
+        ensure_thumbnail(source)
     if image_storage_service.has_local(relative_path):
         return FileResponse(_safe_image_path(relative_path), headers=headers)
     return Response(content=image_storage_service.get_bytes(relative_path), media_type="image/png", headers=headers)
@@ -63,11 +69,30 @@ def get_image_response(relative_path: str) -> FileResponse | Response:
 
 def _thumbnail_path(relative_path: str) -> Path:
     rel = _safe_relative_path(relative_path)
-    return config.image_thumbnails_dir / f"{rel}.png"
+    path = Path(rel)
+    return config.images_dir / path.parent / f"{path.stem}{THUMBNAIL_SUFFIX}.png"
+
+
+def _thumbnail_relative_path(relative_path: str) -> str:
+    rel = Path(_safe_relative_path(relative_path))
+    return (rel.parent / f"{rel.stem}{THUMBNAIL_SUFFIX}.png").as_posix()
+
+
+def _is_thumbnail_path(path: str | Path) -> bool:
+    item = Path(str(path))
+    return item.suffix.lower() == ".png" and item.stem.endswith(THUMBNAIL_SUFFIX)
+
+
+def _source_candidates_for_thumbnail(relative_path: str) -> list[str]:
+    rel = Path(_safe_relative_path(relative_path))
+    if not _is_thumbnail_path(rel):
+        return [rel.as_posix()]
+    source_stem = rel.stem[: -len(THUMBNAIL_SUFFIX)]
+    return [(rel.parent / f"{source_stem}{suffix}").as_posix() for suffix in IMAGE_EXTENSIONS]
 
 
 def thumbnail_url(base_url: str, relative_path: str) -> str:
-    return f"{base_url.rstrip('/')}/image-thumbnails/{_safe_relative_path(relative_path)}"
+    return f"{base_url.rstrip('/')}/images/{_thumbnail_relative_path(relative_path)}"
 
 
 def _image_dimensions(path: Path) -> tuple[int, int] | None:
@@ -104,15 +129,6 @@ def ensure_thumbnail(relative_path: str) -> Path:
     return target
 
 
-def get_thumbnail_response(relative_path: str) -> FileResponse:
-    headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-    }
-    return FileResponse(ensure_thumbnail(relative_path), headers=headers)
-
-
 def get_image_download_response(relative_path: str) -> FileResponse:
     cors_headers = {
         "Access-Control-Allow-Origin": "*",
@@ -135,29 +151,26 @@ def get_image_download_response(relative_path: str) -> FileResponse:
     )
 
 
-def cleanup_image_thumbnails() -> int:
-    thumbnails_root = config.image_thumbnails_dir
+def cleanup_thumbnails() -> int:
     removed = 0
-    for path in thumbnails_root.rglob("*"):
-        if not path.is_file():
+    for path in config.images_dir.rglob(f"*{THUMBNAIL_SUFFIX}.png"):
+        if not path.is_file() or not _is_thumbnail_path(path):
             continue
-        rel = path.relative_to(thumbnails_root).as_posix()
-        if not rel.endswith(".png") or not image_storage_service.exists(rel[:-4]):
+        rel = path.relative_to(config.images_dir).as_posix()
+        if not any(image_storage_service.exists(item) for item in _source_candidates_for_thumbnail(rel)):
             path.unlink()
             removed += 1
-    _cleanup_empty_dirs(thumbnails_root)
+    _cleanup_empty_dirs(config.images_dir)
     return removed
 
 def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict[str, object]:
     config.cleanup_old_images()
-    cleanup_image_thumbnails()
-    all_tags = load_tags()
+    cleanup_thumbnails()
     items = [
         {
             **item,
             "url": str(item.get("url") or f"{base_url.rstrip('/')}/images/{item['path']}"),
             "thumbnail_url": thumbnail_url(base_url, str(item["path"])),
-            "tags": all_tags.get(str(item["path"]), []),
         }
         for item in image_storage_service.list_items(base_url, start_date, end_date)
     ]
@@ -182,12 +195,10 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
             continue
         if image_storage_service.delete(item):
             removed += 1
-        for thumbnail in (_thumbnail_path(item), config.image_thumbnails_dir / _safe_relative_path(item)):
-            if thumbnail.is_file():
-                thumbnail.unlink()
-        remove_tags(item)
+        thumbnail = _thumbnail_path(item)
+        if thumbnail.is_file():
+            thumbnail.unlink()
     _cleanup_empty_dirs(root)
-    _cleanup_empty_dirs(config.image_thumbnails_dir)
     return {"removed": removed}
 
 
@@ -237,7 +248,7 @@ def storage_stats() -> dict:
     image_count = 0
     image_size = 0
     for p in config.images_dir.rglob("*"):
-        if p.is_file():
+        if p.is_file() and not _is_thumbnail_path(p):
             image_count += 1
             image_size += p.stat().st_size
 
@@ -256,7 +267,7 @@ def compress_images(quality: int = 60) -> dict:
     saved = 0
     count = 0
     for p in sorted(config.images_dir.rglob("*.png")):
-        if not p.is_file():
+        if not p.is_file() or _is_thumbnail_path(p):
             continue
         try:
             orig = p.stat().st_size
@@ -284,7 +295,7 @@ def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
         return {"removed": 0, "current_free_mb": current_free, "target_free_mb": target_free_mb, "done": True}
 
     files = sorted(
-        (p for p in config.images_dir.rglob("*.png") if p.is_file()),
+        (p for p in config.images_dir.rglob("*.png") if p.is_file() and not _is_thumbnail_path(p)),
         key=lambda p: p.stat().st_mtime,
     )
     removed = 0
@@ -295,17 +306,15 @@ def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
         size = p.stat().st_size
         if not dry_run:
             rel = p.relative_to(config.images_dir).as_posix()
-            for tp in (_thumbnail_path(rel), config.image_thumbnails_dir / _safe_relative_path(rel)):
-                if tp.is_file():
-                    tp.unlink()
-            remove_tags(rel)
+            thumbnail = _thumbnail_path(rel)
+            if thumbnail.is_file():
+                thumbnail.unlink()
             p.unlink()
         freed += size
         removed += 1
 
     if not dry_run:
         _cleanup_empty_dirs(config.images_dir)
-        _cleanup_empty_dirs(config.image_thumbnails_dir)
 
     return {
         "removed": removed,
@@ -359,7 +368,7 @@ def _auto_cleanup_worker(stop_event: threading.Event) -> None:
     while not stop_event.wait(1800):  # 每30分钟
         try:
             config.cleanup_old_images()
-            cleanup_image_thumbnails()
+            cleanup_thumbnails()
             usage = shutil.disk_usage(config.images_dir)
             free_mb = usage.free // (1024 * 1024)
             if free_mb < min_free_mb:

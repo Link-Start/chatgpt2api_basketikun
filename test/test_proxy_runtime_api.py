@@ -14,14 +14,6 @@ from services.config import DEFAULT_PROXY_RUNTIME
 AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
 
 
-class FakeStorage:
-    def get_backend_info(self) -> dict[str, object]:
-        return {"type": "json"}
-
-    def health_check(self) -> dict[str, object]:
-        return {"ok": True}
-
-
 class FakeConfig:
     def __init__(self) -> None:
         self.data: dict[str, object] = {
@@ -44,10 +36,6 @@ class FakeConfig:
 
     def get_public_proxy_runtime_settings(self) -> dict[str, object]:
         return self.get_proxy_runtime_settings()
-
-    def get_storage_backend(self) -> FakeStorage:
-        return FakeStorage()
-
 
 class FakeProxySettings:
     def get_runtime_status(self) -> dict[str, object]:

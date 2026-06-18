@@ -32,9 +32,10 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restore_at?: string | null;
+  created_at?: string | null;
   success: number;
   fail: number;
-  /** 当前图片在途数(正在生成、尚未结束的图片数)。号池空闲时持续 > 0 表示并发槽位泄漏。 */
+  /** 当前图片并发数(正在生成、尚未结束的图片数)。号池空闲时持续 > 0 表示并发槽位泄漏。 */
   image_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
@@ -74,14 +75,12 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
-  relogined?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
 export type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
-  relogined?: number;
   errors: Array<{ access_token: string; error: string }>;
 };
 
@@ -152,11 +151,25 @@ export type ThirdPartyAppsSettings = {
   };
 };
 
+export type CodexChannel = {
+  id: string;
+  enabled: boolean;
+  name: string;
+  base_url: string;
+  api_key: string;
+  upstream_model: "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | string;
+  model_prefix: string;
+  mapped_model?: string;
+};
+
+export type CodexChannelsSettings = {
+  channels: CodexChannel[];
+};
+
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
   global_system_prompt?: string;
-  sensitive_words?: string[];
   ai_review?: {
     enabled?: boolean;
     base_url?: string;
@@ -175,79 +188,12 @@ export type SettingsConfig = {
   image_timeout_retry_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
-  auto_relogin_after_refresh?: boolean;
   log_levels?: string[];
   image_storage?: ImageStorageSettings;
   proxy_runtime?: ProxyRuntimeSettings;
   third_party_apps?: ThirdPartyAppsSettings;
-  backup?: BackupSettings;
-  backup_state?: BackupState;
+  codex_channels?: CodexChannelsSettings;
   [key: string]: unknown;
-};
-
-export type BackupInclude = {
-  config: boolean;
-  register: boolean;
-  cpa: boolean;
-  sub2api: boolean;
-  logs: boolean;
-  image_tasks: boolean;
-  accounts_snapshot: boolean;
-  auth_keys_snapshot: boolean;
-  images: boolean;
-};
-
-export type BackupSettings = {
-  enabled: boolean;
-  provider: "cloudflare_r2" | string;
-  account_id: string;
-  access_key_id: string;
-  secret_access_key: string;
-  bucket: string;
-  prefix: string;
-  interval_minutes: number | string;
-  rotation_keep: number | string;
-  encrypt: boolean;
-  passphrase: string;
-  include: BackupInclude;
-};
-
-export type BackupState = {
-  running: boolean;
-  last_started_at?: string | null;
-  last_finished_at?: string | null;
-  last_status?: string;
-  last_error?: string | null;
-  last_object_key?: string | null;
-};
-
-export type BackupItem = {
-  key: string;
-  name: string;
-  size: number;
-  updated_at?: string | null;
-  encrypted: boolean;
-};
-
-export type BackupDetail = {
-  key: string;
-  name: string;
-  encrypted: boolean;
-  created_at?: string | null;
-  trigger?: string | null;
-  app_version?: string | null;
-  storage_backend?: Record<string, unknown> | null;
-  files: Array<{
-    name: string;
-    exists: boolean;
-    content_type?: string;
-    size: number;
-    sha256?: string;
-  }>;
-  snapshots: Array<{
-    name: string;
-    count: number;
-  }>;
 };
 
 export type ManagedImage = {
@@ -261,7 +207,6 @@ export type ManagedImage = {
   created_at: string;
   width?: number;
   height?: number;
-  tags?: string[];
 };
 
 export type SystemLog = {
@@ -429,17 +374,6 @@ export async function fetchRefreshProgress(progressId: string) {
   return httpRequest<RefreshProgressResponse>(`/api/accounts/refresh/progress/${progressId}`);
 }
 
-export async function reLoginAccounts(accessTokens: string[]) {
-  return httpRequest<{ progress_id: string }>("/api/accounts/re-login", {
-    method: "POST",
-    body: { access_tokens: accessTokens },
-  });
-}
-
-export async function fetchReLoginProgress(progressId: string) {
-  return httpRequest<RefreshProgressResponse>(`/api/accounts/re-login/progress/${progressId}`);
-}
-
 export async function updateAccount(
   accessToken: string,
   updates: {
@@ -575,13 +509,6 @@ export async function fetchThirdPartyApps() {
   return httpRequest<{ third_party_apps: ThirdPartyAppsSettings }>("/api/third-party-apps");
 }
 
-export async function testBackupConnection() {
-  return httpRequest<{ result: { ok: boolean; status: number } }>("/api/backup/test", {
-    method: "POST",
-    body: {},
-  });
-}
-
 export async function testImageStorageConnection() {
   return httpRequest<{ result: { ok: boolean; status: number; error?: string } }>("/api/image-storage/test", {
     method: "POST",
@@ -594,36 +521,6 @@ export async function syncImageStorage() {
     method: "POST",
     body: {},
   });
-}
-
-export async function fetchBackups() {
-  return httpRequest<{ items: BackupItem[]; state: BackupState; settings: BackupSettings }>("/api/backups");
-}
-
-export async function runBackupNow() {
-  return httpRequest<{ result: { key: string; size: number; encrypted: boolean } }>("/api/backups/run", {
-    method: "POST",
-    body: {},
-  });
-}
-
-export async function deleteBackup(key: string) {
-  return httpRequest<{ ok: boolean }>("/api/backups/delete", {
-    method: "POST",
-    body: { key },
-  });
-}
-
-export async function fetchBackupDetail(key: string) {
-  const params = new URLSearchParams();
-  params.set("key", key);
-  return httpRequest<{ item: BackupDetail }>(`/api/backups/detail?${params.toString()}`);
-}
-
-export function getBackupDownloadUrl(key: string) {
-  const params = new URLSearchParams();
-  params.set("key", key);
-  return `/api/backups/download?${params.toString()}`;
 }
 
 export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
@@ -663,23 +560,6 @@ export async function downloadSingleImage(path: string) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-
-export async function fetchImageTags() {
-  return httpRequest<{ tags: string[] }>("/api/images/tags");
-}
-
-export async function setImageTags(path: string, tags: string[]) {
-  return httpRequest<{ ok: boolean; tags: string[] }>("/api/images/tags", {
-    method: "POST",
-    body: { path, tags },
-  });
-}
-
-export async function deleteImageTag(tag: string) {
-  return httpRequest<{ ok: boolean; removed_from: number }>(`/api/images/tags/${encodeURIComponent(tag)}`, {
-    method: "DELETE",
-  });
 }
 
 export type ImageStorageStats = {

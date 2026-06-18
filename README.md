@@ -25,10 +25,11 @@ cd chatgpt2api
 docker compose up -d
 ```
 
-启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
+启动前请先复制 `.env.example` 为 `.env`，并设置 `CHATGPT2API_AUTH_KEY`。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
+- 配置文件：`./config.yaml`，不存在时会从 `config.example.yaml` 自动复制
 - 数据目录：`./data`
 
 ### WARP / FlareSolverr 稳定代理部署
@@ -80,22 +81,9 @@ docker-compose up -d
 
 ```
 
-### 存储后端配置
+### 存储
 
-支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
-
-- `json` - 本地 JSON 文件（默认）
-- `sqlite` - 本地 SQLite 数据库
-- `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
-- `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
-
-示例：使用 PostgreSQL
-
-```yaml
-environment:
-  - STORAGE_BACKEND=postgres
-  - DATABASE_URL=postgresql://user:password@host:5432/dbname
-```
+账号和鉴权密钥统一使用本地 JSON 文件存储，默认路径为 `data/accounts.json` 和 `data/auth_keys.json`。
 
 ## 功能
 
@@ -130,7 +118,6 @@ environment:
 - 轮询可用账号执行图片生成与图片编辑
 - 遇到 Token 失效类错误时自动剔除无效 Token
 - 定时检查限流账号并自动刷新
-- 支持密码重新登录恢复异常账号，刷新后可自动重登
 - 支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
 - 支持 WARP / FlareSolverr 稳定代理运行时
 - 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号

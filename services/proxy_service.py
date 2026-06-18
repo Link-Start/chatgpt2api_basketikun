@@ -11,7 +11,7 @@ from typing import Callable, Mapping
 from urllib import request as urllib_request
 from urllib.parse import quote, urlparse
 
-from curl_cffi.requests import Session
+from utils.http_client import HttpClient
 
 from services.config import config
 
@@ -20,7 +20,7 @@ FlareSolverrRequestMethod = Callable[[str, bytes, dict[str, str], float], bytes]
 
 
 def normalize_proxy_url(url: str) -> str:
-    """Normalize proxy URLs for curl_cffi.
+    """Normalize proxy URLs for outbound HTTP clients.
 
     SOCKS proxies should use remote-DNS resolution by default, so generic
     ``socks://`` and ``socks5://`` inputs are upgraded to ``socks5h://``.
@@ -217,20 +217,20 @@ class ProxySettingsStore:
             clearance=clearance,
         )
 
-    def build_session_kwargs(
+    def build_client_kwargs(
         self,
         account: dict | None = None,
         proxy: str = "",
         resource: bool = False,
         upstream: bool = False,
-        **session_kwargs,
+        **client_kwargs,
     ) -> dict[str, object]:
         profile = self.get_profile(account=account, proxy=proxy, resource=resource, upstream=upstream)
         if profile.proxy_url:
-            session_kwargs["proxy"] = profile.proxy_url
+            client_kwargs["proxy"] = profile.proxy_url
         if profile.runtime_enabled and profile.skip_ssl_verify:
-            session_kwargs["verify"] = False
-        return session_kwargs
+            client_kwargs["verify"] = False
+        return client_kwargs
 
     def build_headers(
         self,
@@ -565,7 +565,7 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
             "error": "invalid proxy url",
             **result_base,
         }
-    session = Session(impersonate="edge101", verify=True, proxy=candidate)
+    session = HttpClient(fingerprint="edge101", verify=True, proxy=candidate)
     started = time.perf_counter()
     try:
         response = session.get(

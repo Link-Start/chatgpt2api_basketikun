@@ -12,7 +12,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from curl_cffi.requests import Session
+    from utils.http_client import HttpClient
 
 
 class SentinelTokenGenerator:
@@ -94,7 +94,7 @@ DEFAULT_SENTINEL_SEC_CH_UA = '"Chromium";v="145", "Google Chrome";v="145", "Not/
 
 
 def build_sentinel_token(
-    session: "Session",
+    session: "HttpClient",
     device_id: str,
     flow: str,
     *,
@@ -104,7 +104,7 @@ def build_sentinel_token(
     """请求 sentinel token 并返回 (sentinel_header_value, oai_sc_cookie_value)。
 
     Args:
-        session: curl_cffi Session 实例
+        session: HTTP 客户端实例
         device_id: 设备 ID
         flow: 流程标识（如 "password_verify", "username_password_create" 等）
         user_agent: 可选的 User-Agent 覆盖
@@ -132,7 +132,6 @@ def build_sentinel_token(
             "sec-ch-ua-platform": '"Windows"',
         },
         timeout=20,
-        verify=False,
     )
 
     try:

@@ -6,9 +6,8 @@ import { LoaderCircle } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
-import { BackupSettingsCard } from "./components/backup-settings-card";
-import { ApiDocsCard } from "./components/api-docs-card";
-import { ConfigCard } from "./components/config-card";
+import { ConfigCard, ContentReviewCard, ImageSettingsCard } from "./components/config-card";
+import { CodexChannelsCard } from "./components/codex-channels-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
@@ -21,9 +20,10 @@ import { useSettingsStore } from "./store";
 
 const settingsTabs = [
   { value: "basic", title: "基础配置" },
-  { value: "backup", title: "备份" },
+  { value: "review", title: "内容审核" },
+  { value: "image", title: "图片设置" },
+  { value: "codex", title: "渠道设置" },
   { value: "keys", title: "用户密钥" },
-  { value: "api-docs", title: "接口接入" },
   { value: "canvas", title: "画布入口" },
   { value: "proxy", title: "FlareSolverr" },
   { value: "cpa", title: "CPA" },
@@ -34,9 +34,7 @@ function SettingsDataController() {
   const didLoadRef = useRef(false);
   const initialize = useSettingsStore((state) => state.initialize);
   const loadPools = useSettingsStore((state) => state.loadPools);
-  const loadBackups = useSettingsStore((state) => state.loadBackups);
   const pools = useSettingsStore((state) => state.pools);
-  const backupState = useSettingsStore((state) => state.backupState);
 
   useEffect(() => {
     if (didLoadRef.current) {
@@ -61,16 +59,6 @@ function SettingsDataController() {
     return () => window.clearInterval(timer);
   }, [loadPools, pools]);
 
-  useEffect(() => {
-    if (!backupState?.running) {
-      return;
-    }
-    const timer = window.setInterval(() => {
-      void loadBackups(true);
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [backupState?.running, loadBackups]);
-
   return null;
 }
 
@@ -92,20 +80,23 @@ function SettingsPageContent() {
         <TabsContent value="basic">
           <ConfigCard />
         </TabsContent>
+        <TabsContent value="review">
+          <ContentReviewCard />
+        </TabsContent>
+        <TabsContent value="image">
+          <ImageSettingsCard />
+        </TabsContent>
+        <TabsContent value="codex">
+          <CodexChannelsCard />
+        </TabsContent>
         <TabsContent value="proxy">
           <ProxyRuntimeCard />
-        </TabsContent>
-        <TabsContent value="backup">
-          <BackupSettingsCard />
         </TabsContent>
         <TabsContent value="keys">
           <UserKeysCard />
         </TabsContent>
         <TabsContent value="canvas">
           <ThirdPartyAppsCard />
-        </TabsContent>
-        <TabsContent value="api-docs">
-          <ApiDocsCard />
         </TabsContent>
         <TabsContent value="cpa">
           <CPAPoolsCard />

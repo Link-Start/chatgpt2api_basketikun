@@ -1,13 +1,17 @@
 services:
   init-config:
-    image: python:3.13-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chatgpt2api:warp
     container_name: chatgpt2api-warp-init
     working_dir: /app
     volumes:
-      - ./config.json:/app/config.json
+      - .:/config
       - ./scripts:/app/scripts:ro
     environment:
-      CHATGPT2API_CONFIG_FILE: /app/config.json
+      CHATGPT2API_CONFIG_FILE: /config/config.yaml
+      CHATGPT2API_EXAMPLE_CONFIG_FILE: /config/config.example.yaml
       CHATGPT2API_PROXY_RUNTIME_ENABLED: ${CHATGPT2API_PROXY_RUNTIME_ENABLED:-true}
       CHATGPT2API_PROXY_RUNTIME_EGRESS_MODE: ${CHATGPT2API_PROXY_RUNTIME_EGRESS_MODE:-single_proxy}
       CHATGPT2API_PROXY_RUNTIME_PROXY_URL: ${CHATGPT2API_PROXY_RUNTIME_PROXY_URL:-http://privoxy:8118}
@@ -22,7 +26,7 @@ services:
       CHATGPT2API_PROXY_RUNTIME_BROWSER: ${CHATGPT2API_PROXY_RUNTIME_BROWSER:-chrome}
       CHATGPT2API_PROXY_RUNTIME_USER_AGENT: ${CHATGPT2API_PROXY_RUNTIME_USER_AGENT:-}
       CHATGPT2API_FLARESOLVERR_URL: ${CHATGPT2API_FLARESOLVERR_URL:-http://flaresolverr:8191}
-    command: ["python3", "/app/scripts/init_proxy_config.py"]
+    command: ["uv", "run", "python", "/app/scripts/init_proxy_config.py"]
     restart: "no"
 
   warp-proxy:
@@ -72,7 +76,6 @@ services:
     restart: unless-stopped
     environment:
       LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
-      TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "127.0.0.1:${FLARESOLVERR_PORT:-8191}:8191"
     healthcheck:
@@ -100,9 +103,9 @@ services:
       - "${CHATGPT2API_PORT:-3000}:80"
     volumes:
       - ./data:/app/data
-      - ./config.json:/app/config.json
+      - .:/config
     environment:
-      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
-      DATABASE_URL: ${DATABASE_URL:-}
-      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY}
       CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
+      CHATGPT2API_CONFIG_FILE: /config/config.yaml
+      CHATGPT2API_EXAMPLE_CONFIG_FILE: /config/config.example.yaml

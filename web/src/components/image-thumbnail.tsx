@@ -13,10 +13,13 @@ type ImageThumbnailProps = {
 };
 
 export function getImageThumbnailUrl(src: string) {
-  const marker = "/images/";
-  const index = src.indexOf(marker);
-  if (index < 0) return src;
-  return `${src.slice(0, index)}/image-thumbnails/${src.slice(index + marker.length)}`;
+  const queryIndex = src.search(/[?#]/);
+  const pathEnd = queryIndex < 0 ? src.length : queryIndex;
+  const path = src.slice(0, pathEnd);
+  const suffix = src.slice(pathEnd);
+  const dotIndex = path.lastIndexOf(".");
+  if (dotIndex < 0) return src;
+  return `${path.slice(0, dotIndex)}_thumbnail.png${suffix}`;
 }
 
 export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageClassName }: ImageThumbnailProps) {

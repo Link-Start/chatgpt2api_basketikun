@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
-from curl_cffi import requests
+import httpx
+from utils.http_client import get
 from fastapi import HTTPException
 from services.proxy_service import proxy_settings
 from utils.log import logger
@@ -174,7 +175,7 @@ class UpstreamHTTPError(RuntimeError):
         super().__init__(f"{context} failed: status={status_code}, body={body_str}")
 
 
-def ensure_ok(response: requests.Response, context: str) -> None:
+def ensure_ok(response: httpx.Response, context: str) -> None:
     if 200 <= response.status_code < 300:
         return
     body: Any = response.text
@@ -226,7 +227,7 @@ def anthropic_sse_stream(items) -> Iterator[str]:
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
 
-def iter_sse_payloads(response: requests.Response) -> Iterator[str]:
+def iter_sse_payloads(response: httpx.Response) -> Iterator[str]:
     for raw_line in response.iter_lines():
         if not raw_line:
             continue
@@ -339,12 +340,12 @@ def _decode_message_image_url(value: object) -> tuple[bytes, str] | None:
         return None
 
     try:
-        response = requests.get(
+        response = get(
             source,
             headers={"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api vision fetcher"},
             timeout=REMOTE_IMAGE_TIMEOUT_SECONDS,
-            allow_redirects=True,
-            **proxy_settings.build_session_kwargs(),
+            follow_redirects=True,
+            **proxy_settings.build_client_kwargs(),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail={"error": f"image_url fetch failed: {exc}"}) from exc

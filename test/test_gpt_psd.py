@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -16,7 +17,7 @@ POLL_INTERVAL_SECS = 5
 
 
 def request_json(method: str, path: str, payload: dict | None = None) -> dict:
-    api_key = json.loads((Path(__file__).resolve().parents[1] / "config.json").read_text(encoding="utf-8"))["auth-key"]
+    api_key = os.getenv("CHATGPT2API_AUTH_KEY", "")
     if not api_key.strip():
         raise ValueError("API_KEY is empty")
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()

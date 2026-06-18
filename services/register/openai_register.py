@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from curl_cffi import requests
+from utils.http_client import HttpClient
 
 from services.account_service import account_service
 from services.proxy_service import ClearanceBundle, proxy_settings
@@ -172,7 +172,7 @@ def _response_json(resp) -> dict:
         return {}
 
 
-def _response_debug_detail(resp, limit: int = 800) -> str:
+def _response_debug_detail(resp, limit: int | None = 800) -> str:
     if resp is None:
         return ""
     data = _response_json(resp)
@@ -185,9 +185,11 @@ def _response_debug_detail(resp, limit: int = 800) -> str:
         if value:
             parts.append(f"{key}={value}")
     if data:
-        parts.append(f"json={json.dumps(data, ensure_ascii=False)[:limit]}")
+        text = json.dumps(data, ensure_ascii=False)
+        parts.append(f"json={text if limit is None else text[:limit]}")
     else:
-        parts.append(f"body={str(getattr(resp, 'text', '') or '')[:limit]}")
+        text = str(getattr(resp, "text", "") or "")
+        parts.append(f"body={text if limit is None else text[:limit]}")
     return ", ".join(parts)
 
 
@@ -246,23 +248,23 @@ def wait_for_code(mailbox: dict) -> str | None:
 from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
 
 
-def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> str:
+def build_sentinel_token(session: HttpClient, device_id: str, flow: str) -> str:
     """请求 sentinel token，返回 sentinel header 字符串（兼容旧接口）。"""
     sentinel_val, _oai_sc_val = _build_sentinel_token_tuple(session, device_id, flow, user_agent=user_agent, sec_ch_ua=sec_ch_ua)
     return sentinel_val
 
 
 def create_session(proxy: str = "") -> Any:
-    kwargs = proxy_settings.build_session_kwargs(
+    kwargs = proxy_settings.build_client_kwargs(
         proxy=proxy,
         upstream=True,
-        impersonate="chrome",
+        fingerprint="chrome",
         verify=False,
     )
-    return requests.Session(**kwargs)
+    return HttpClient(**kwargs)
 
 
-def _apply_clearance_to_session(session: requests.Session, bundle: ClearanceBundle | None) -> None:
+def _apply_clearance_to_session(session: HttpClient, bundle: ClearanceBundle | None) -> None:
     if bundle is None:
         return
     if bundle.user_agent:
@@ -297,12 +299,12 @@ def _headers_with_clearance(
 
 def _cloudflare_block_message(resp, prefix: str = "被 Cloudflare 拦截", reason: str = "") -> str:
     status = getattr(resp, "status_code", "unknown")
-    debug = _response_debug_detail(resp)
+    debug = _response_debug_detail(resp, limit=None)
     reason = reason or "clearance 刷新失败或重试后仍失败，请更换 IP/代理重试"
     return f"{prefix}，{reason}: status={status}, {debug}"
 
 
-def request_with_local_retry(session: requests.Session, method: str, url: str, retry_attempts: int = 3, **kwargs):
+def request_with_local_retry(session: HttpClient, method: str, url: str, retry_attempts: int = 3, **kwargs):
     last_error = ""
     for _ in range(max(1, retry_attempts)):
         try:
@@ -313,16 +315,16 @@ def request_with_local_retry(session: requests.Session, method: str, url: str, r
     return None, last_error
 
 
-def validate_otp(session: requests.Session, device_id: str, code: str):
+def validate_otp(session: HttpClient, device_id: str, code: str):
     headers = dict(common_headers)
     headers["referer"] = f"{auth_base}/email-verification"
     headers["oai-device-id"] = device_id
     headers.update(_make_trace_headers())
-    resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers, verify=False)
+    resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers)
     if resp is not None and resp.status_code == 200:
         return resp, ""
     headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, "authorize_continue")
-    resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers, verify=False)
+    resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/email-otp/validate", json={"code": code}, headers=headers)
     return resp, error
 
 
@@ -339,7 +341,24 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
-def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
+def _extract_platform_auth_code(resp) -> str:
+    data = _response_json(resp)
+    candidates = [
+        str(data.get("continue_url") or "").strip(),
+        str(getattr(resp, "headers", {}).get("location") or "").strip(),
+        str(getattr(resp, "url", "") or "").strip(),
+    ]
+    for candidate in candidates:
+        params = extract_oauth_callback_params_from_url(candidate)
+        code = str((params or {}).get("code") or "").strip()
+        if code:
+            return code
+    return ""
+
+
+def request_platform_oauth_token(session: HttpClient, code: str, code_verifier: str) -> dict | None:
+    if not str(code or "").strip():
+        raise RuntimeError("token换取失败: code 为空，create_account 未返回授权码")
     headers = {
         "accept": "*/*",
         "accept-language": "zh-CN,zh;q=0.9",
@@ -368,13 +387,17 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
             "code": code,
             "redirect_uri": platform_oauth_redirect_uri,
         },
-        verify=False,
         timeout=60,
     )
     if resp.status_code != 200:
-        print(resp.text)
-        return None
-    return _response_json(resp)
+        detail = _response_debug_detail(resp, limit=1200)
+        print(detail)
+        raise RuntimeError(f"token换取失败: HTTP {resp.status_code}, {detail}")
+    data = _response_json(resp)
+    if not data.get("access_token"):
+        detail = _response_debug_detail(resp, limit=1200)
+        raise RuntimeError(f"token换取失败: 响应缺少 access_token, {detail}")
+    return data
 
 
 class PlatformRegistrar:
@@ -457,13 +480,13 @@ class PlatformRegistrar:
         target_url = f"{auth_base}/api/accounts/authorize?{urlencode(params)}"
         headers = self._navigate_headers(f"{platform_base}/")
         headers = _headers_with_clearance(headers, target_url, self.proxy, self.clearance_user_agent)
-        resp, error = request_with_local_retry(self.session, "get", target_url, headers=headers, allow_redirects=True, verify=False)
+        resp, error = request_with_local_retry(self.session, "get", target_url, headers=headers, follow_redirects=True)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
             retry_headers = _headers_with_clearance(self._navigate_headers(f"{platform_base}/"), target_url, self.proxy, self.clearance_user_agent)
-            resp, error = request_with_local_retry(self.session, "get", target_url, headers=retry_headers, allow_redirects=True, verify=False)
+            resp, error = request_with_local_retry(self.session, "get", target_url, headers=retry_headers, follow_redirects=True)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code != 200:
@@ -483,7 +506,7 @@ class PlatformRegistrar:
         headers = self._json_headers(f"{auth_base}/create-account/password")
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
         headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-        resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
+        resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
@@ -491,7 +514,7 @@ class PlatformRegistrar:
             headers = self._json_headers(f"{auth_base}/create-account/password")
             headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-            resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
+            resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code != 200:
@@ -506,13 +529,13 @@ class PlatformRegistrar:
         step(index, "开始发送验证码")
         url = f"{auth_base}/api/accounts/email-otp/send"
         headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
-        resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
+        resp, error = request_with_local_retry(self.session, "get", url, headers=headers, follow_redirects=True)
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
                 raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
             headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
-            resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
+            resp, error = request_with_local_retry(self.session, "get", url, headers=headers, follow_redirects=True)
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code not in (200, 302):
@@ -537,7 +560,14 @@ class PlatformRegistrar:
         headers = self._json_headers(f"{auth_base}/about-you")
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
         headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-        resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
+        resp, error = request_with_local_retry(
+            self.session,
+            "post",
+            url,
+            json={"name": name, "birthdate": birthdate},
+            headers=headers,
+            follow_redirects=False,
+        )
         if _is_cloudflare_challenge(resp):
             bundle = self._refresh_cloudflare_clearance(auth_base, index)
             if bundle is None:
@@ -545,7 +575,14 @@ class PlatformRegistrar:
             headers = self._json_headers(f"{auth_base}/about-you")
             headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
             headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
-            resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
+            resp, error = request_with_local_retry(
+                self.session,
+                "post",
+                url,
+                json={"name": name, "birthdate": birthdate},
+                headers=headers,
+                follow_redirects=False,
+            )
             if _is_cloudflare_challenge(resp):
                 raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code not in (200, 302):
@@ -554,16 +591,14 @@ class PlatformRegistrar:
                 step(index, "创建账号失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
-        data = _response_json(resp)
-        callback_params = extract_oauth_callback_params_from_url(str(data.get("continue_url") or "").strip())
-        self.platform_auth_code = str((callback_params or {}).get("code") or "").strip()
+        self.platform_auth_code = _extract_platform_auth_code(resp)
+        if not self.platform_auth_code:
+            raise RuntimeError(f"create_account 未返回授权码: {_response_debug_detail(resp, limit=1200)}")
         step(index, "创建账号资料完成")
 
     def _exchange_registered_tokens(self, index: int) -> dict:
         step(index, "开始换 token")
         tokens = request_platform_oauth_token(self.session, self.platform_auth_code, self.code_verifier)
-        if not tokens:
-            raise RuntimeError("token换取失败")
         step(index, "token 换取完成")
         return tokens
 

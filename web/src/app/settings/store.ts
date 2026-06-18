@@ -5,28 +5,23 @@ import { toast } from "sonner";
 
 import {
   createCPAPool,
-  deleteBackup,
   deleteCPAPool,
   fetchCPAPoolFiles,
   fetchCPAPools,
-  fetchBackups,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
   resetOutlookPool as resetOutlookPoolApi,
   fetchSettingsConfig,
-  runBackupNow,
   syncImageStorage,
   startRegister,
   startCPAImport,
   stopRegister,
-  testBackupConnection,
   testImageStorageConnection,
   updateCPAPool,
   updateRegisterConfig,
   updateSettingsConfig,
-  type BackupItem,
-  type BackupSettings,
-  type BackupState,
+  type CodexChannel,
+  type CodexChannelsSettings,
   type CPAPool,
   type CPARemoteFile,
   type ImageStorageMode,
@@ -72,6 +67,12 @@ const DEFAULT_THIRD_PARTY_APPS: ThirdPartyAppsSettings = {
     url: "https://canvas.best",
   },
 };
+
+const DEFAULT_CODEX_CHANNELS: CodexChannelsSettings = {
+  channels: [],
+};
+
+const CODEX_UPSTREAM_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] as const;
 
 function normalizeProxyRuntime(value: unknown): ProxyRuntimeSettings {
   const source = typeof value === "object" && value !== null ? value as Partial<ProxyRuntimeSettings> : {};
@@ -128,6 +129,30 @@ function normalizeThirdPartyApps(value: unknown): ThirdPartyAppsSettings {
   };
 }
 
+function normalizeCodexChannels(value: unknown): CodexChannelsSettings {
+  const source = typeof value === "object" && value !== null ? value as Partial<CodexChannelsSettings> : {};
+  const channels = Array.isArray(source.channels) ? source.channels : [];
+  return {
+    channels: channels.map((item, index) => {
+      const channel = typeof item === "object" && item !== null ? item as Partial<CodexChannel> : {};
+      const prefix = String(channel.model_prefix || "").trim().toLowerCase();
+      const upstreamModel = CODEX_UPSTREAM_MODELS.includes(channel.upstream_model as typeof CODEX_UPSTREAM_MODELS[number])
+        ? String(channel.upstream_model)
+        : "gpt-5.5";
+      return {
+        id: String(channel.id || `channel-${index + 1}`),
+        enabled: Boolean(channel.enabled),
+        name: String(channel.name || ""),
+        base_url: String(channel.base_url || ""),
+        api_key: String(channel.api_key || ""),
+        upstream_model: upstreamModel,
+        model_prefix: prefix,
+        mapped_model: prefix ? `${prefix}-gpt-image-2` : "",
+      };
+    }),
+  };
+}
+
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const imageStorage = typeof config.image_storage === "object" && config.image_storage
     ? config.image_storage as ImageStorageSettings
@@ -145,32 +170,6 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     : imageStorage.enabled && imageStorage.mode === "webdav"
       ? "webdav"
       : "local";
-  const backup = typeof config.backup === "object" && config.backup
-    ? config.backup as BackupSettings
-    : {
-      enabled: false,
-      provider: "cloudflare_r2",
-      account_id: "",
-      access_key_id: "",
-      secret_access_key: "",
-      bucket: "",
-      prefix: "backups",
-      interval_minutes: 360,
-      rotation_keep: 10,
-      encrypt: false,
-      passphrase: "",
-      include: {
-        config: true,
-        register: true,
-        cpa: true,
-        sub2api: true,
-        logs: true,
-        image_tasks: true,
-        accounts_snapshot: true,
-        auth_keys_snapshot: true,
-        images: false,
-      },
-    };
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
@@ -183,12 +182,10 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
-    auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
     global_system_prompt: String(config.global_system_prompt || ""),
-    sensitive_words: Array.isArray(config.sensitive_words) ? config.sensitive_words : [],
     ai_review: {
       enabled: Boolean(config.ai_review?.enabled),
       base_url: String(config.ai_review?.base_url || ""),
@@ -207,30 +204,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     },
     proxy_runtime: normalizeProxyRuntime(config.proxy_runtime),
     third_party_apps: normalizeThirdPartyApps(config.third_party_apps),
-    backup: {
-      ...backup,
-      enabled: Boolean(backup.enabled),
-      account_id: String(backup.account_id || ""),
-      access_key_id: String(backup.access_key_id || ""),
-      secret_access_key: String(backup.secret_access_key || ""),
-      bucket: String(backup.bucket || ""),
-      prefix: String(backup.prefix || "backups"),
-      interval_minutes: Number(backup.interval_minutes || 360),
-      rotation_keep: Number(backup.rotation_keep ?? 10),
-      encrypt: Boolean(backup.encrypt),
-      passphrase: String(backup.passphrase || ""),
-      include: {
-        config: Boolean(backup.include?.config ?? true),
-        register: Boolean(backup.include?.register ?? true),
-        cpa: Boolean(backup.include?.cpa ?? true),
-        sub2api: Boolean(backup.include?.sub2api ?? true),
-        logs: Boolean(backup.include?.logs ?? true),
-        image_tasks: Boolean(backup.include?.image_tasks ?? true),
-        accounts_snapshot: Boolean(backup.include?.accounts_snapshot ?? true),
-        auth_keys_snapshot: Boolean(backup.include?.auth_keys_snapshot ?? true),
-        images: Boolean(backup.include?.images ?? false),
-      },
-    },
+    codex_channels: normalizeCodexChannels(config.codex_channels),
   };
 }
 
@@ -255,12 +229,6 @@ type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
-  backups: BackupItem[];
-  backupState: BackupState | null;
-  isLoadingBackups: boolean;
-  isRunningBackup: boolean;
-  deletingBackupKey: string | null;
-  isTestingBackup: boolean;
   isTestingImageStorage: boolean;
   isSyncingImageStorage: boolean;
 
@@ -293,10 +261,6 @@ type SettingsStore = {
   initialize: () => Promise<void>;
   loadConfig: () => Promise<void>;
   saveConfig: () => Promise<boolean>;
-  loadBackups: (silent?: boolean) => Promise<void>;
-  runBackup: () => Promise<void>;
-  removeBackup: (key: string) => Promise<void>;
-  testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
@@ -307,22 +271,21 @@ type SettingsStore = {
   setImageTimeoutRetrySecs: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
-  setAutoReloginAfterRefresh: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
   setGlobalSystemPrompt: (value: string) => void;
-  setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
   setImageStorageField: (key: keyof ImageStorageSettings, value: string | boolean) => void;
   setProxyRuntimeField: <K extends keyof ProxyRuntimeSettings>(key: K, value: ProxyRuntimeSettings[K]) => void;
   setProxyRuntimeClearanceField: <K extends keyof ProxyRuntimeSettings["clearance"]>(key: K, value: ProxyRuntimeSettings["clearance"][K]) => void;
   setProxyRuntimeStatusCodesText: (value: string) => void;
   setInfiniteCanvasField: <K extends keyof ThirdPartyAppsSettings["infinite_canvas"]>(key: K, value: ThirdPartyAppsSettings["infinite_canvas"][K]) => void;
+  addCodexChannel: () => void;
+  updateCodexChannel: (id: string, updates: Partial<CodexChannel>) => void;
+  deleteCodexChannel: (id: string) => void;
   testImageStorage: () => Promise<void>;
   syncImagesToWebDAV: () => Promise<void>;
-  setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
-  setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -367,12 +330,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
-  backups: [],
-  backupState: null,
-  isLoadingBackups: true,
-  isRunningBackup: false,
-  deletingBackupKey: null,
-  isTestingBackup: false,
   isTestingImageStorage: false,
   isSyncingImageStorage: false,
 
@@ -404,18 +361,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   initialize: async () => {
     await Promise.allSettled([get().loadConfig(), get().loadPools()]);
-    const backup = get().config?.backup;
-    const isConfigured = Boolean(
-      String(backup?.account_id || "").trim()
-      && String(backup?.access_key_id || "").trim()
-      && String(backup?.secret_access_key || "").trim()
-      && String(backup?.bucket || "").trim(),
-    );
-    if (isConfigured) {
-      await get().loadBackups();
-    } else {
-      set({ backups: [], isLoadingBackups: false });
-    }
   },
 
   loadConfig: async () => {
@@ -453,11 +398,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
-        auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
-        sensitive_words: (config.sensitive_words || []).map((item) => String(item).trim()).filter(Boolean),
         ai_review: {
           enabled: Boolean(config.ai_review?.enabled),
           base_url: String(config.ai_review?.base_url || "").trim(),
@@ -500,16 +443,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             url: String(config.third_party_apps?.infinite_canvas?.url || DEFAULT_THIRD_PARTY_APPS.infinite_canvas.url).trim(),
           },
         },
-        backup: {
-          ...(config.backup as BackupSettings),
-          account_id: String(config.backup?.account_id || "").trim(),
-          access_key_id: String(config.backup?.access_key_id || "").trim(),
-          secret_access_key: String(config.backup?.secret_access_key || "").trim(),
-          bucket: String(config.backup?.bucket || "").trim(),
-          prefix: String(config.backup?.prefix || "backups").trim(),
-          interval_minutes: Math.max(1, Number(config.backup?.interval_minutes) || 360),
-          rotation_keep: Math.max(0, Number(config.backup?.rotation_keep) || 0),
-          passphrase: String(config.backup?.passphrase || "").trim(),
+        codex_channels: {
+          channels: normalizeCodexChannels(config.codex_channels).channels.map((channel) => ({
+            ...channel,
+            name: String(channel.name || "").trim(),
+            base_url: String(channel.base_url || "").trim(),
+            api_key: String(channel.api_key || "").trim(),
+            model_prefix: String(channel.model_prefix || "").trim().toLowerCase(),
+          })),
         },
       });
       set({
@@ -576,10 +517,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.config ? { config: { ...state.config, auto_remove_rate_limited_accounts: value } } : {});
   },
 
-  setAutoReloginAfterRefresh: (value) => {
-    set((state) => state.config ? { config: { ...state.config, auto_relogin_after_refresh: value } } : {});
-  },
-
   setLogLevel: (level, enabled) => {
     set((state) => {
       if (!state.config) return {};
@@ -620,10 +557,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setGlobalSystemPrompt: (value) => {
     set((state) => state.config ? { config: { ...state.config, global_system_prompt: value } } : {});
-  },
-
-  setSensitiveWordsText: (value) => {
-    set((state) => state.config ? { config: { ...state.config, sensitive_words: value.split("\n") } } : {});
   },
 
   setAIReviewField: (key, value) => {
@@ -738,6 +671,81 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     });
   },
 
+  addCodexChannel: () => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      const settings = normalizeCodexChannels(state.config.codex_channels || DEFAULT_CODEX_CHANNELS);
+      const id = `channel-${Date.now()}`;
+      return {
+        config: {
+          ...state.config,
+          codex_channels: {
+            channels: [
+              ...settings.channels,
+              {
+                id,
+                enabled: true,
+                name: "",
+                base_url: "",
+                api_key: "",
+                upstream_model: "gpt-5.5",
+                model_prefix: "",
+                mapped_model: "",
+              },
+            ],
+          },
+        },
+      };
+    });
+  },
+
+  updateCodexChannel: (id, updates) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      const settings = normalizeCodexChannels(state.config.codex_channels || DEFAULT_CODEX_CHANNELS);
+      return {
+        config: {
+          ...state.config,
+          codex_channels: {
+            channels: settings.channels.map((channel) => {
+              if (channel.id !== id) {
+                return channel;
+              }
+              const next = { ...channel, ...updates };
+              const prefix = String(next.model_prefix || "").trim().toLowerCase();
+              return {
+                ...next,
+                model_prefix: prefix,
+                mapped_model: prefix ? `${prefix}-gpt-image-2` : "",
+              };
+            }),
+          },
+        },
+      };
+    });
+  },
+
+  deleteCodexChannel: (id) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      const settings = normalizeCodexChannels(state.config.codex_channels || DEFAULT_CODEX_CHANNELS);
+      return {
+        config: {
+          ...state.config,
+          codex_channels: {
+            channels: settings.channels.filter((channel) => channel.id !== id),
+          },
+        },
+      };
+    });
+  },
+
   testImageStorage: async () => {
     set({ isTestingImageStorage: true });
     try {
@@ -771,110 +779,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       toast.error(error instanceof Error ? error.message : "同步图片失败");
     } finally {
       set({ isSyncingImageStorage: false });
-    }
-  },
-
-  setBackupField: (key, value) => {
-    set((state) => {
-      if (!state.config?.backup) {
-        return {};
-      }
-      return {
-        config: {
-          ...state.config,
-          backup: {
-            ...state.config.backup,
-            [key]: value,
-          },
-        },
-      };
-    });
-  },
-
-  setBackupInclude: (key, value) => {
-    set((state) => {
-      if (!state.config?.backup) {
-        return {};
-      }
-      return {
-        config: {
-          ...state.config,
-          backup: {
-            ...state.config.backup,
-            include: {
-              ...state.config.backup.include,
-              [key]: value,
-            },
-          },
-        },
-      };
-    });
-  },
-
-  loadBackups: async (silent = false) => {
-    if (!silent) {
-      set({ isLoadingBackups: true });
-    }
-    try {
-      const data = await fetchBackups();
-      set({
-        backups: data.items,
-        backupState: data.state,
-      });
-    } catch (error) {
-      if (!silent) {
-        toast.error(error instanceof Error ? error.message : "加载备份列表失败");
-      }
-    } finally {
-      if (!silent) {
-        set({ isLoadingBackups: false });
-      }
-    }
-  },
-
-  runBackup: async () => {
-    set({ isRunningBackup: true });
-    try {
-      const saved = await get().saveConfig();
-      if (!saved) {
-        return;
-      }
-      const data = await runBackupNow();
-      toast.success(`备份已完成：${data.result.key}`);
-      await get().loadBackups(true);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "执行备份失败");
-    } finally {
-      set({ isRunningBackup: false });
-    }
-  },
-
-  removeBackup: async (key) => {
-    set({ deletingBackupKey: key });
-    try {
-      await deleteBackup(key);
-      toast.success("备份已删除");
-      await get().loadBackups(true);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "删除备份失败");
-    } finally {
-      set({ deletingBackupKey: null });
-    }
-  },
-
-  testBackup: async () => {
-    set({ isTestingBackup: true });
-    try {
-      const saved = await get().saveConfig();
-      if (!saved) {
-        return;
-      }
-      const data = await testBackupConnection();
-      toast.success(`R2 连接正常（HTTP ${data.result.status}）`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "测试备份连接失败");
-    } finally {
-      set({ isTestingBackup: false });
     }
   },
 

@@ -22,8 +22,8 @@ git --version
 
 | 路径 | 作用 |
 | --- | --- |
-| `config.json` | 主配置、后台密钥、代理、图片、备份等配置 |
-| `.env` | Docker compose 环境变量 |
+| `config.yaml` | 主配置、代理、图片等配置，缺失时从 `config.example.yaml` 自动复制 |
+| `.env` | Docker compose 环境变量，包含管理员密钥 |
 | `data/` | 账号、注册配置、日志、图片、任务记录等运行数据 |
 
 升级和迁移时重点保留以上内容。
@@ -37,11 +37,16 @@ git clone git@github.com:basketikun/chatgpt2api.git
 cd chatgpt2api
 ```
 
-设置 `config.json` 中的 `auth-key`，或在 `docker-compose.yml` 中配置：
+复制环境变量模板：
 
-```yaml
-environment:
-  - CHATGPT2API_AUTH_KEY=your_secret_key
+```bash
+cp .env.example .env
+```
+
+至少修改 `.env` 中的：
+
+```text
+CHATGPT2API_AUTH_KEY=your_secret_key_here
 ```
 
 启动：
@@ -154,40 +159,11 @@ bun install
 bun run dev
 ```
 
-源码方式运行时，后端默认读取项目根目录的 `config.json` 和 `data/`。
+源码方式运行时，后端默认读取项目根目录的 `config.yaml` 和 `data/`。
 
-## 存储后端
+## 存储
 
-默认使用本地 JSON 文件：
-
-```text
-STORAGE_BACKEND=json
-```
-
-可选值：
-
-| 值 | 说明 |
-| --- | --- |
-| `json` | 本地 JSON 文件，默认方式 |
-| `sqlite` | 本地 SQLite，通常存放在 `data/accounts.db` |
-| `postgres` | 外部 PostgreSQL |
-| `git` | Git 私有仓库存储账号数据 |
-
-PostgreSQL 示例：
-
-```yaml
-environment:
-  - STORAGE_BACKEND=postgres
-  - DATABASE_URL=postgresql://user:password@host:5432/dbname
-```
-
-SQLite 示例：
-
-```yaml
-environment:
-  - STORAGE_BACKEND=sqlite
-  - DATABASE_URL=sqlite:////app/data/accounts.db
-```
+账号和鉴权密钥统一使用本地 JSON 文件存储，容器中默认路径为 `/app/data/accounts.json` 和 `/app/data/auth_keys.json`。
 
 ## 升级前备份
 
@@ -195,16 +171,14 @@ environment:
 
 ```bash
 mkdir -p backups
-tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json .env data
+tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.yaml .env data
 ```
 
 如果没有 `.env`，可以去掉：
 
 ```bash
-tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json data
+tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.yaml data
 ```
-
-也可以在后台设置页配置 Cloudflare R2 备份，用于定时备份关键数据。
 
 ## 升级：普通 Docker 部署
 
@@ -218,7 +192,7 @@ cd chatgpt2api
 
 ```bash
 mkdir -p backups
-tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json .env data
+tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.yaml .env data
 ```
 
 拉取最新代码和镜像：
@@ -248,7 +222,7 @@ cd chatgpt2api
 
 ```bash
 mkdir -p backups
-tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.json .env data
+tar -czf backups/chatgpt2api-$(date +%Y%m%d-%H%M%S).tgz config.yaml .env data
 ```
 
 拉取最新代码并重新构建：
@@ -360,4 +334,4 @@ docker compose -f docker-compose.warp.yml restart
 docker image prune
 ```
 
-不要直接删除 `data/`、`config.json`、`.env`，除非已经确认有可用备份。
+不要直接删除 `data/`、`config.yaml`、`.env`，除非已经确认有可用备份。
