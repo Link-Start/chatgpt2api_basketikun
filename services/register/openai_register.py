@@ -7,7 +7,7 @@ import string
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -17,6 +17,7 @@ from curl_cffi import requests as curl_requests
 from services.account.account_service import account_service
 from services.proxy_service import ClearanceBundle, proxy_settings
 from services.register import mail_provider
+from utils.date_utils import utc_now_iso
 
 base_dir = Path(__file__).resolve().parent
 config = {
@@ -651,7 +652,7 @@ class PlatformRegistrar:
             "refresh_token": str(tokens.get("refresh_token") or "").strip(),
             "id_token": str(tokens.get("id_token") or "").strip(),
             "source_type": "web",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": utc_now_iso(),
         }
 
 

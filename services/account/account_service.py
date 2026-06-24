@@ -15,7 +15,7 @@ from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
-from utils.date_utils import parse_time, utc_now_text
+from utils.date_utils import local_now_text, parse_time, utc_now, utc_now_iso, utc_now_text
 from utils.helper import anonymize_token
 from utils.jwt_utils import decode_jwt_payload
 
@@ -150,7 +150,7 @@ class AccountService:
         """把输入账号数据整理成内部统一结构。"""
         if not isinstance(item, dict):
             return None
-        access_token = item.get("access_token") or item.get("accessToken") or ""
+        access_token = str(item.get("access_token") or item.get("accessToken") or "").strip()
         if not access_token:
             return None
         normalized = dict(item)
@@ -253,7 +253,7 @@ class AccountService:
 
     def _record_token_refresh_error(self, access_token: str, event: str, error: str) -> None:
         """记录 refresh_token 刷新 access_token 的错误。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = utc_now_iso()
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)
             current = self._accounts.get(resolved)
@@ -277,7 +277,7 @@ class AccountService:
         last_error_at = parse_time(account.get("last_token_refresh_error_at"))
         if last_error_at is None:
             return False
-        return (datetime.now(timezone.utc) - last_error_at).total_seconds() < self._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
+        return (utc_now() - last_error_at).total_seconds() < self._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
 
     def _recent_refresh_token_keepalive_error(self, account: dict, now: datetime) -> bool:
         """判断 refresh_token keepalive 是否处于错误退避期。"""
@@ -360,7 +360,7 @@ class AccountService:
 
     def _apply_refreshed_tokens(self, old_access_token: str, token_data: dict, event: str) -> str:
         """把刷新得到的新 token 写回账号池。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = utc_now_iso()
         with self._image_slot_condition:
             old_token = self._resolve_access_token_locked(old_access_token)
             current = self._accounts.get(old_token)
@@ -441,7 +441,7 @@ class AccountService:
 
     def list_refresh_token_keepalive_tokens(self) -> list[str]:
         """列出需要执行 refresh_token keepalive 的账号 token。"""
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         due_items: list[tuple[datetime, str]] = []
         with self._lock:
             for account in self._accounts.values():
@@ -500,7 +500,7 @@ class AccountService:
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
-               and (token := item.get("access_token") or "")
+               and (token := str(item.get("access_token") or "").strip())
                and token not in excluded
         ]
 
@@ -608,7 +608,7 @@ class AccountService:
                 token
                 for account in self._accounts.values()
                 if account.get("status") not in {"禁用", "异常"}
-                   and (token := account.get("access_token") or "")
+                   and (token := str(account.get("access_token") or "").strip())
                    and token not in excluded
             ]
             if not candidates:
@@ -627,7 +627,7 @@ class AccountService:
             if current is None:
                 return
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = local_now_text()
             account = self._normalize_account(next_item)
             if account is None:
                 return
@@ -643,7 +643,7 @@ class AccountService:
                     "status": "异常",
                     "quota": 0,
                     "last_refresh_error": str(error or "invalid access token"),
-                    "last_refresh_error_at": datetime.now(timezone.utc).isoformat(),
+                    "last_refresh_error_at": utc_now_iso(),
                 },
                 quiet=quiet,
             )
@@ -677,14 +677,14 @@ class AccountService:
             result = []
             for item in self._accounts.values():
                 account = dict(item)
-                token = account.get("access_token") or ""
+                token = str(account.get("access_token") or "")
                 account["image_inflight"] = int(self._image_inflight.get(token, 0))
                 result.append(account)
             return result
 
     def list_due_refresh_tokens(self, status: str) -> list[str]:
         """按账号独立刷新时间列出到期 token。"""
-        now = datetime.now(timezone.utc)
+        now = utc_now()
         due_items: list[tuple[datetime, str]] = []
         with self._lock:
             for account in self._accounts.values():
@@ -866,7 +866,7 @@ class AccountService:
             if current is None:
                 return None
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = local_now_text()
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
@@ -935,7 +935,7 @@ class AccountService:
 
     def _release_refresh_token(self, access_token: str, refreshed: bool) -> None:
         """释放刷新占用，并在成功时记录刷新时间。"""
-        now = datetime.now(timezone.utc).isoformat()
+        now = utc_now_iso()
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)
             self._refreshing_tokens.discard(access_token)
@@ -1001,7 +1001,7 @@ class AccountService:
         total_fail = sum(int(a.get("fail") or 0) for a in items)
         by_type = {}
         for a in items:
-            t = a.get("type", "unknown")
+            t = str(a.get("type") or "unknown")
             by_type[t] = by_type.get(t, 0) + 1
         return {
             "total": total,

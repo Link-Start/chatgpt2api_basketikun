@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from urllib.parse import quote, urlparse
@@ -15,6 +13,9 @@ from fastapi import HTTPException
 from PIL import Image
 
 from services.config import DATA_DIR, config
+from utils.date_utils import local_now_text, local_timestamp_date, local_timestamp_text
+from utils.json_utils import read_json, write_json
+from utils.text_utils import clean_text
 
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
 IMAGE_INDEX_LOCK = Lock()
@@ -32,14 +33,6 @@ class StoredImage:
     url: str
     storage: str
     size: int
-
-
-def _clean(value: object) -> str:
-    return str(value or "").strip()
-
-
-def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _safe_relative_path(path: str) -> str:
@@ -84,29 +77,23 @@ def _local_image_path(relative_path: str) -> Path:
     return path
 
 
+
+
 def _read_json_object(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = read_json(path, {})
     return data if isinstance(data, dict) else {}
 
 
 def _write_json_object(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    write_json(path, data, atomic=True)
 
 
 class WebDAVClient:
     def __init__(self, settings: dict[str, object]):
-        self.url = _clean(settings.get("webdav_url")).rstrip("/")
-        self.username = _clean(settings.get("webdav_username"))
-        self.password = _clean(settings.get("webdav_password"))
-        self.root_path = _clean(settings.get("webdav_root_path")).strip("/")
+        self.url = clean_text(settings.get("webdav_url")).rstrip("/")
+        self.username = clean_text(settings.get("webdav_username"))
+        self.password = clean_text(settings.get("webdav_password"))
+        self.root_path = clean_text(settings.get("webdav_root_path")).strip("/")
         self.session = httpx.Client()
 
     def _auth_kwargs(self) -> dict[str, object]:
@@ -179,7 +166,7 @@ class ImageStorageService:
         return config.get_image_storage_settings()
 
     def mode(self) -> str:
-        return _clean(self.settings().get("mode")) or "local"
+        return clean_text(self.settings().get("mode")) or "local"
 
     def _load_index(self) -> dict[str, dict[str, object]]:
         raw = _read_json_object(self.index_file)
@@ -197,7 +184,7 @@ class ImageStorageService:
 
     def _public_url(self, rel: str, base_url: str | None = None) -> str:
         settings = self.settings()
-        public_base_url = _clean(settings.get("public_base_url"))
+        public_base_url = clean_text(settings.get("public_base_url"))
         if public_base_url:
             return f"{public_base_url.rstrip('/')}/{_safe_relative_path(rel)}"
         return f"{(base_url or config.base_url).rstrip('/')}/images/{_safe_relative_path(rel)}"
@@ -235,7 +222,7 @@ class ImageStorageService:
             "name": Path(rel).name,
             "date": "-".join(rel.split("/")[:3]),
             "size": len(image_data),
-            "created_at": _now_iso(),
+            "created_at": local_now_text(),
             "storage": "both" if stored_local and stored_webdav else ("webdav" if stored_webdav else "local"),
             "local": stored_local,
             "webdav": stored_webdav,
@@ -294,9 +281,9 @@ class ImageStorageService:
                     "rel": rel,
                     "path": rel,
                     "name": path.name,
-                    "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
+                    "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else local_timestamp_date(path.stat().st_mtime),
                     "size": path.stat().st_size,
-                    "created_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "created_at": local_timestamp_text(path.stat().st_mtime),
                     "storage": "local",
                     "local": True,
                     "webdav": False,
@@ -389,9 +376,9 @@ class ImageStorageService:
                         "rel": rel,
                         "path": rel,
                         "name": path.name,
-                        "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
+                        "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else local_timestamp_date(path.stat().st_mtime),
                         "size": len(payload),
-                        "created_at": str(item.get("created_at") or datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")),
+                        "created_at": str(item.get("created_at") or local_timestamp_text(path.stat().st_mtime)),
                         "storage": "both",
                         "local": True,
                         "webdav": True,

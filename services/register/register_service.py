@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import threading
 import time
-import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +10,9 @@ from pathlib import Path
 from services.account.account_service import account_service
 from services.config import DATA_DIR
 from services.register import mail_provider, openai_register
+from utils.date_utils import utc_now_iso
+from utils.id_utils import hex_id
+from utils.json_utils import read_json, write_json
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
@@ -31,9 +33,6 @@ def _merge_outlook_pool(old_text: str, new_text: str) -> str:
         merged[credential["email"].strip().lower()] = credential
     return _serialize_outlook_pool(list(merged.values()))
 
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _default_config() -> dict:
@@ -72,13 +71,12 @@ class RegisterService:
 
     def _load(self) -> dict:
         try:
-            return _normalize(json.loads(self._store_file.read_text(encoding="utf-8")))
+            return _normalize(read_json(self._store_file, {}))
         except Exception:
             return _normalize({})
 
     def _save(self) -> None:
-        self._store_file.parent.mkdir(parents=True, exist_ok=True)
-        self._store_file.write_text(json.dumps(self._config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json(self._store_file, self._config)
 
     def get(self) -> dict:
         with self._lock:
@@ -178,7 +176,17 @@ class RegisterService:
             self._drop_mail_proxy()
             self._logs = []
             metrics = self._pool_metrics()
-            self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
+            self._config["stats"] = {
+                "job_id": hex_id(),
+                "success": 0,
+                "fail": 0,
+                "done": 0,
+                "running": 0,
+                "threads": self._config["threads"],
+                **metrics,
+                "started_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            }
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
@@ -191,7 +199,7 @@ class RegisterService:
     def stop(self) -> dict:
         with self._lock:
             self._config["enabled"] = False
-            self._config["stats"]["updated_at"] = _now()
+            self._config["stats"]["updated_at"] = utc_now_iso()
             self._save()
             self._append_log("已请求停止注册任务，正在等待当前运行任务结束", "yellow")
             return self.get()
@@ -199,7 +207,18 @@ class RegisterService:
     def reset(self) -> dict:
         with self._lock:
             self._logs = []
-            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **self._pool_metrics(), "updated_at": _now()}
+            self._config["stats"] = {
+                "success": 0,
+                "fail": 0,
+                "done": 0,
+                "running": 0,
+                "threads": self._config["threads"],
+                "elapsed_seconds": 0,
+                "avg_seconds": 0,
+                "success_rate": 0,
+                **self._pool_metrics(),
+                "updated_at": utc_now_iso(),
+            }
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": 0.0})
             self._save()
@@ -225,7 +244,11 @@ class RegisterService:
 
     def _append_log(self, text: str, color: str = "") -> None:
         with self._lock:
-            self._logs.append({"time": _now(), "text": str(text), "level": str(color or "info")})
+            self._logs.append({
+                "time": utc_now_iso(),
+                "text": str(text),
+                "level": str(color or "info"),
+            })
             self._logs = self._logs[-300:]
 
     def _pool_metrics(self) -> dict:
@@ -266,7 +289,7 @@ class RegisterService:
                 stats["elapsed_seconds"] = round(elapsed, 1)
                 stats["avg_seconds"] = round(elapsed / success, 1) if success else 0
                 stats["success_rate"] = round(success * 100 / max(1, success + fail), 1)
-            self._config["stats"]["updated_at"] = _now()
+            self._config["stats"]["updated_at"] = utc_now_iso()
             self._save()
 
     def _run(self) -> None:
@@ -294,7 +317,13 @@ class RegisterService:
                         fail += 0 if result.get("ok") else 1
                     except Exception:
                         fail += 1
-        self._bump(running=0, done=done, success=success, fail=fail, finished_at=_now())
+        self._bump(
+            running=0,
+            done=done,
+            success=success,
+            fail=fail,
+            finished_at=utc_now_iso(),
+        )
         with self._lock:
             self._config["enabled"] = False
             self._save()

@@ -18,6 +18,7 @@ import httpx
 
 
 from services.config import DATA_DIR
+from utils.date_utils import utc_now_iso
 
 DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
 _ddg_aliases_lock = Lock()
@@ -128,7 +129,7 @@ def _set_outlook_token_state(address: str, state: str, reason: str = "") -> None
         return
     with _outlook_token_state_lock:
         store = _load_outlook_token_state()
-        store[target] = {"state": str(state), "reason": str(reason or ""), "updated_at": datetime.now(timezone.utc).isoformat()}
+        store[target] = {"state": str(state), "reason": str(reason or ""), "updated_at": utc_now_iso()}
         _save_outlook_token_state(store)
 
 
@@ -1178,7 +1179,7 @@ class OutlookTokenProvider(BaseMailProvider):
             credential = next((item for item in self.pool if _outlook_entry_available(store.get(item["email"].strip().lower()))), None)
             if credential is None:
                 raise RuntimeError(f"[{self.label}] OutlookToken 邮箱池暂无可用邮箱（共 {len(self.pool)} 个，已用尽或全部占用/失效），请导入新邮箱或重置池状态")
-            store[credential["email"].strip().lower()] = {"state": "in_use", "reason": "", "updated_at": datetime.now(timezone.utc).isoformat()}
+            store[credential["email"].strip().lower()] = {"state": "in_use", "reason": "", "updated_at": utc_now_iso()}
             _save_outlook_token_state(store)
         return {
             "provider": self.name,

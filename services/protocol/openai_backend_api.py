@@ -7,8 +7,6 @@ import re
 import time
 from contextlib import contextmanager
 
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -135,10 +133,8 @@ class OpenAIBackendAPI:
     """ChatGPT Web 后端封装。
 
     说明：
-    - 传入 `access_token` 时，聊天和模型列表都会走已登录链路
+    - 必须传入 `access_token`，聊天和模型列表都会走已登录链路
       例如 `/backend-api/sentinel/chat-requirements`、`/backend-api/conversation`
-    - 不传 `access_token` 时，会走未登录链路
-      例如 `/backend-anon/sentinel/chat-requirements`、`/backend-anon/conversation`
     - `stream_conversation()` 是底层统一流式入口
     - 协议兼容转换放在 `services.protocol`
     """
@@ -153,13 +149,15 @@ class OpenAIBackendAPI:
 
         参数：
         - `account`：可选。账号对象，优先从这里读取 token、email、user_id、type 等信息。
-        - `access_token`：可选。兼容旧调用；传入后表示使用已登录链路。
+        - `access_token`：可选。兼容旧调用。
         """
         self.base_url = "https://chatgpt.com"
         self.client_version = DEFAULT_CLIENT_VERSION
         self.client_build_number = DEFAULT_CLIENT_BUILD_NUMBER
         self.account = account if isinstance(account, dict) else {}
         self.access_token = str(self.account.get("access_token") or access_token or "").strip()
+        if not self.access_token:
+            raise RuntimeError("access_token is required")
         if not self.account and self.access_token:
             self.account = account_service.get_account(self.access_token) or {"access_token": self.access_token}
         elif self.access_token and not self.account.get("access_token"):
@@ -206,8 +204,7 @@ class OpenAIBackendAPI:
             "OAI-Client-Version": self.client_version,
             "OAI-Client-Build-Number": self.client_build_number,
         })
-        if self.access_token:
-            self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+        self.session.headers["Authorization"] = f"Bearer {self.access_token}"
 
     @contextmanager
     def _timed_step(self, name: str, **extra: Any):
@@ -2255,8 +2252,8 @@ class OpenAIBackendAPI:
         normalized = messages or [{"role": "user", "content": prompt}]
         self._bootstrap()
         requirements = self._get_chat_requirements()
-        path, timezone = self._chat_target()
-        payload = self._conversation_payload(normalized, model, timezone)
+        path = "/backend-api/conversation"
+        payload = self._conversation_payload(normalized, model, "Asia/Shanghai")
         response = self.session.post(
             self.base_url + path,
             headers=self._conversation_headers(path, requirements),
@@ -2322,7 +2319,7 @@ class OpenAIBackendAPI:
 
     def _get_chat_requirements(self) -> ChatRequirements:
         """获取当前模式对话所需的 sentinel token（prepare + finalize 两步流程）。"""
-        base = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
+        base = "/backend-api/sentinel/chat-requirements"
         p_token = build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)
 
         prepare_path = base + "/prepare"
@@ -2370,7 +2367,7 @@ class OpenAIBackendAPI:
 
         token = data.get("token", "")
         if not token:
-            message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
+            message = "missing auth chat requirements token"
             raise RuntimeError(f"{message}: {data}")
 
         return ChatRequirements(
@@ -2381,19 +2378,12 @@ class OpenAIBackendAPI:
             raw_finalize=data,
         )
 
-    def _chat_target(self) -> tuple[str, str]:
-        if self.access_token:
-            return "/backend-api/conversation", "Asia/Shanghai"
-        return "/backend-anon/conversation", "America/Los_Angeles"
-
     def list_models(self) -> Dict[str, Any]:
         """返回当前模式下可用模型，格式对齐 OpenAI `/v1/models`。"""
         self._bootstrap()
-        path = "/backend-api/models?history_and_training_disabled=false" if self.access_token else (
-            "/backend-anon/models?iim=false&is_gizmo=false"
-        )
-        route = "/backend-api/models" if self.access_token else "/backend-anon/models"
-        context = "auth_models" if self.access_token else "anon_models"
+        path = "/backend-api/models?history_and_training_disabled=false"
+        route = "/backend-api/models"
+        context = "auth_models"
         response = self.session.get(
             self.base_url + path,
             headers=self._headers(route),

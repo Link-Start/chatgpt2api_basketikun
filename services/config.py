@@ -99,11 +99,9 @@ DEFAULT_CONFIG = {
             "warm_up_on_start": False,
         },
     },
-    "third_party_apps": {
-        "infinite_canvas": {
-            "enabled": False,
-            "url": "https://canvas.best",
-        },
+    "infinite_canvas": {
+        "enabled": False,
+        "url": "https://canvas.best",
     },
     "codex_channels": {
         "channels": [
@@ -113,8 +111,6 @@ DEFAULT_CONFIG = {
                 "enabled": True,
                 "name": "系统渠道",
                 "weight": 1,
-                "mapped_models": CODEX_SYSTEM_MODELS,
-                "mapped_model": CODEX_SYSTEM_MODEL,
             },
         ],
     },
@@ -293,25 +289,36 @@ class ConfigStore:
         clearance["has_cf_clearance"] = bool(cf_clearance)
         return runtime
 
-    def get_third_party_apps_settings(self) -> dict[str, object]:
-        return self.data["third_party_apps"]
+    def get_infinite_canvas_settings(self) -> dict[str, object]:
+        return self.data["infinite_canvas"]
 
     def get_codex_channels_settings(self) -> dict[str, object]:
         return self.data["codex_channels"]
 
     def list_enabled_codex_channels(self) -> list[dict[str, object]]:
         channels = self.data["codex_channels"]["channels"]
-        return [
-            dict(channel)
-            for channel in channels
-            if channel["enabled"]
-               and int(channel["weight"]) > 0
-               and channel["mapped_models"]
-               and (channel["type"] == CODEX_SYSTEM_TYPE or (
-                    str(channel["base_url"]).strip()
-                    and str(channel["api_key"]).strip()
-               ))
-        ]
+        result = []
+        for channel in channels:
+            item = dict(channel)
+            item["type"] = item.get("type") or (
+                CODEX_SYSTEM_TYPE
+                if item.get("id") == CODEX_SYSTEM_CHANNEL_ID
+                else CODEX_TOOL_CALL_TYPE
+            )
+            if item["type"] == CODEX_SYSTEM_TYPE:
+                item["mapped_models"] = CODEX_SYSTEM_MODELS
+            is_system = item["type"] == CODEX_SYSTEM_TYPE
+            has_base_url = str(item.get("base_url") or "").strip()
+            has_api_key = str(item.get("api_key") or "").strip()
+            has_upstream = has_base_url and has_api_key
+            if (
+                item.get("enabled")
+                and int(item.get("weight") or 0) > 0
+                and item.get("mapped_models")
+                and (is_system or has_upstream)
+            ):
+                result.append(item)
+        return result
 
     def list_codex_channels_for_model(self, model: object) -> list[dict[str, object]]:
         normalized = str(model or "").strip().lower()

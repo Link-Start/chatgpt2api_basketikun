@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -15,7 +13,10 @@ from services.image_storage_service import image_storage_service
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from utils.date_utils import local_now_text, local_timestamp_text
 from utils.helper import new_uuid
+from utils.json_utils import read_json, write_json
+from utils.text_utils import clean_text
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -29,16 +30,9 @@ EDITABLE_FILE_ROOT = DATA_DIR / "files"
 EDITABLE_FILE_PLAN_TYPES = ("Plus", "Team", "Pro", "Enterprise")
 
 
-def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _clean(value: object, default: str = "") -> str:
-    return str(value or default).strip()
-
 
 def _owner_id(identity: dict[str, object]) -> str:
-    return _clean(identity.get("id")) or "anonymous"
+    return clean_text(identity.get("id")) or "anonymous"
 
 
 def _task_key(owner_id: str, task_id: str) -> str:
@@ -48,14 +42,14 @@ def _task_key(owner_id: str, task_id: str) -> str:
 def _editable_access_token() -> str:
     accounts = [
         item for item in account_service.list_accounts()
-        if _clean(item.get("access_token"))
+        if clean_text(item.get("access_token"))
         and item.get("status") not in {"禁用", "异常"}
         and account_service._account_matches_any_plan_type(item, EDITABLE_FILE_PLAN_TYPES)
     ]
     if not accounts:
         raise RuntimeError("no available plus/team/pro account")
-    accounts.sort(key=lambda item: _clean(item.get("last_used_at")))
-    token = _clean(accounts[0].get("access_token"))
+    accounts.sort(key=lambda item: clean_text(item.get("last_used_at")))
+    token = clean_text(accounts[0].get("access_token"))
     return account_service.refresh_access_token(token, event="editable_file_task") or token
 
 
@@ -66,25 +60,19 @@ def _file_url(path: Path, base_url: str) -> str:
 
 
 def _title(prompt: str, fallback: str) -> str:
-    text = " ".join(_clean(prompt).split())
+    text = " ".join(clean_text(prompt).split())
     return text[:24] or fallback
 
 
-def _load_array(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+
+
+def _read_json_array(path: Path) -> list[dict[str, Any]]:
+    raw = read_json(path, [])
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
-def _save_array(path: Path, items: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+def _write_json_array(path: Path, items: list[dict[str, Any]]) -> None:
+    write_json(path, items, atomic=True)
 
 
 def _elapsed(task: dict[str, Any]) -> int:
@@ -149,11 +137,11 @@ class TaskService:
         self.tasks_path = tasks_path
         self._lock = threading.RLock()
         with self._lock:
-            self._conversations = _load_array(self.conversations_path)
+            self._conversations = _read_json_array(self.conversations_path)
             self._tasks = {
-                _task_key(_clean(item.get("owner_id")), _clean(item.get("id"))): item
-                for item in _load_array(self.tasks_path)
-                if _clean(item.get("owner_id")) and _clean(item.get("id"))
+                _task_key(clean_text(item.get("owner_id")), clean_text(item.get("id"))): item
+                for item in _read_json_array(self.tasks_path)
+                if clean_text(item.get("owner_id")) and clean_text(item.get("id"))
             }
             if self._recover_unfinished_locked():
                 self._save_tasks_locked()
@@ -180,8 +168,8 @@ class TaskService:
         owner = _owner_id(identity)
         with self._lock:
             item = self._find_conversation_locked(owner, conversation_id)
-            item["title"] = _clean(title, item.get("title") or "未命名")
-            item["updated_at"] = _now()
+            item["title"] = clean_text(title, item.get("title") or "未命名")
+            item["updated_at"] = local_now_text()
             self._save_conversations_locked()
             return self._public_conversation(item)
 
@@ -225,7 +213,7 @@ class TaskService:
                     turns.append(next_turn)
             if turns:
                 conversation["turns"] = turns
-                conversation["updated_at"] = _now()
+                conversation["updated_at"] = local_now_text()
             else:
                 self._conversations.remove(conversation)
             self._save_conversations_locked()
@@ -233,7 +221,7 @@ class TaskService:
 
     def list_tasks(self, identity: dict[str, object], task_ids: list[str], kind: str = "") -> dict[str, Any]:
         owner = _owner_id(identity)
-        ids = [_clean(item) for item in task_ids if _clean(item)]
+        ids = [clean_text(item) for item in task_ids if clean_text(item)]
         with self._lock:
             if ids:
                 items = [
@@ -268,20 +256,20 @@ class TaskService:
         images: list[tuple[bytes, str, str]] | None = None,
     ) -> dict[str, Any]:
         owner = _owner_id(identity)
-        now = _now()
+        now = local_now_text()
         turn_id = new_uuid()
-        conversation_id = _clean(conversation_id) or new_uuid()
+        conversation_id = clean_text(conversation_id) or new_uuid()
         reference_images = self._save_reference_images(images or [], base_url)
         task_ids = [new_uuid() for _ in range(max(1, count))]
         turn = {
             "id": turn_id,
             "mode": "edit" if mode == "edit" else "generate",
             "prompt": prompt,
-            "model": _clean(model, "gpt-image-2"),
+            "model": clean_text(model, "gpt-image-2"),
             "size": size,
-            "quality": _clean(quality, "auto"),
-            "ratio": _clean(ratio, "1:1"),
-            "tier": _clean(tier, "1k"),
+            "quality": clean_text(quality, "auto"),
+            "ratio": clean_text(ratio, "1:1"),
+            "tier": clean_text(tier, "1k"),
             "count": len(task_ids),
             "reference_images": reference_images,
             "task_ids": task_ids,
@@ -348,7 +336,7 @@ class TaskService:
         base_url: str,
     ) -> dict[str, Any]:
         owner = _owner_id(identity)
-        now = _now()
+        now = local_now_text()
         conversation_id = new_uuid()
         turn_id = new_uuid()
         task_id = new_uuid()
@@ -413,7 +401,7 @@ class TaskService:
                 raise ValueError("task not found")
             task["status"] = STATUS_RUNNING
             task["error"] = ""
-            task["updated_at"] = _now()
+            task["updated_at"] = local_now_text()
             self._save_tasks_locked()
             return _public_task(task)
 
@@ -439,7 +427,7 @@ class TaskService:
             if not isinstance(step_timings, list):
                 step_timings = []
             if not isinstance(data, list) or not data:
-                raise RuntimeError(_clean(result.get("message") if isinstance(result, dict) else "") or "图片生成失败")
+                raise RuntimeError(clean_text(result.get("message") if isinstance(result, dict) else "") or "图片生成失败")
             items = [
                 {
                     "type": "image",
@@ -593,17 +581,17 @@ class TaskService:
             if not task:
                 return
             task.update(updates)
-            task["updated_at"] = _now()
+            task["updated_at"] = local_now_text()
             task["updated_ts"] = time.time()
             self._save_tasks_locked()
 
     def _save_conversations_locked(self) -> None:
         self._conversations.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        _save_array(self.conversations_path, self._conversations)
+        _write_json_array(self.conversations_path, self._conversations)
 
     def _save_tasks_locked(self) -> None:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-        _save_array(self.tasks_path, items)
+        _write_json_array(self.tasks_path, items)
 
     def _recover_unfinished_locked(self) -> bool:
         changed = False
@@ -611,7 +599,7 @@ class TaskService:
             if task.get("status") in UNFINISHED_STATUSES:
                 task["status"] = STATUS_ERROR
                 task["error"] = "服务已重启，未完成的任务已中断"
-                task["updated_at"] = _now()
+                task["updated_at"] = local_now_text()
                 task["ended_ts"] = time.time()
                 changed = True
         return changed
@@ -634,8 +622,8 @@ class TaskService:
             "key_name": identity.get("name"),
             "role": identity.get("role"),
             "model": model,
-            "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
-            "ended_at": _now(),
+            "started_at": local_timestamp_text(started),
+            "ended_at": local_now_text(),
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,
             "kind": kind,

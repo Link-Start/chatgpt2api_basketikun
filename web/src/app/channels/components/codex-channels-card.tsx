@@ -105,7 +105,7 @@ export function CodexChannelsCard() {
                       </TableCell>
                       <TableCell className="font-mono text-sm">{channel.weight ?? 1}</TableCell>
                       <TableCell className="font-mono text-xs text-stone-600">{isSystem ? "-" : channel.upstream_model || "-"}</TableCell>
-                      <TableCell className="font-mono text-xs text-stone-600">{channel.mapped_model || channel.mapped_models?.[0] || "-"}</TableCell>
+                      <TableCell className="font-mono text-xs text-stone-600">{isSystem ? "-" : channel.mapped_model || channel.mapped_models?.[0] || "-"}</TableCell>
                       <TableCell>
                         <div className="flex justify-end gap-2">
                           <Button type="button" variant="outline" size="icon" className="size-8 rounded-lg border-stone-200 bg-white" onClick={() => setEditingId(channel.id)} title="编辑渠道">
@@ -166,7 +166,7 @@ function ChannelDialog({
     setTestImage("");
     setTestError("");
     try {
-      const data = await testCodexChannel({ type: channel.type, base_url: channel.base_url, api_key: channel.api_key, upstream_model: channel.upstream_model || "gpt-5.5", prompt: testPrompt });
+      const data = await testCodexChannel({ type: channel.type, base_url: channel.base_url || "", api_key: channel.api_key || "", upstream_model: channel.upstream_model || "gpt-5.5", prompt: testPrompt });
       setTestImage(data.result.image);
     } catch (err) {
       setTestError(err instanceof Error ? err.message : String(err));
@@ -201,11 +201,11 @@ function ChannelDialog({
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <label className="text-sm text-stone-700">Base URL</label>
-                  <Input value={channel.base_url} onChange={(event) => onChange({ base_url: event.target.value })} placeholder="https://api.example.com/v1" className="h-10 rounded-xl border-stone-200 bg-white" />
+                  <Input value={channel.base_url || ""} onChange={(event) => onChange({ base_url: event.target.value })} placeholder="https://api.example.com/v1" className="h-10 rounded-xl border-stone-200 bg-white" />
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm text-stone-700">API Key</label>
-                  <Input type="password" value={channel.api_key} onChange={(event) => onChange({ api_key: event.target.value })} placeholder="sk-..." className="h-10 rounded-xl border-stone-200 bg-white" />
+                  <Input type="password" value={channel.api_key || ""} onChange={(event) => onChange({ api_key: event.target.value })} placeholder="sk-..." className="h-10 rounded-xl border-stone-200 bg-white" />
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm text-stone-700">上游模型</label>
@@ -230,7 +230,7 @@ function ChannelDialog({
                   <div className="text-sm font-medium text-stone-900">测试生图</div>
                   <div className="mt-1 text-xs text-stone-500">提示词：{testPrompt} · 1024x1024</div>
                 </div>
-                <Button type="button" variant="outline" className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700" onClick={() => void runTest()} disabled={testing || !channel.base_url.trim() || !channel.api_key.trim()}>
+                <Button type="button" variant="outline" className="h-9 rounded-lg border-stone-200 bg-white px-3 text-stone-700" onClick={() => void runTest()} disabled={testing || !String(channel.base_url || "").trim() || !String(channel.api_key || "").trim()}>
                   {testing ? <LoaderCircle className="size-4 animate-spin" /> : <ImageIcon className="size-4" />}
                   开始测试
                 </Button>

@@ -72,8 +72,22 @@ def list_image_models() -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
+def list_text_models() -> dict[str, Any]:
+    token = account_service.get_text_access_token()
+    account = account_service.get_account(token) or {"access_token": token}
+    return OpenAIBackendAPI(account=account).list_models()
+
+
+def get_models(model_type: str | None = None) -> dict[str, Any]:
+    if model_type == "image":
+        return list_image_models()
+    if model_type == "text":
+        return list_text_models()
+    return list_models()
+
+
 def list_models() -> dict[str, Any]:
-    result = OpenAIBackendAPI().list_models()
+    result = list_text_models()
     data = result.get("data")
     if not isinstance(data, list):
         return result

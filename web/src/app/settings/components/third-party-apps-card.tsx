@@ -16,7 +16,7 @@ export function ThirdPartyAppsCard() {
   const setInfiniteCanvasField = useSettingsStore((state) => state.setInfiniteCanvasField);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
-  if (isLoadingConfig || !config?.third_party_apps) {
+  if (isLoadingConfig || !config?.infinite_canvas) {
     return (
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="flex items-center justify-center p-10">
@@ -26,7 +26,7 @@ export function ThirdPartyAppsCard() {
     );
   }
 
-  const canvas = config.third_party_apps.infinite_canvas;
+  const canvas = config.infinite_canvas;
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">

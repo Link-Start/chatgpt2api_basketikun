@@ -25,6 +25,10 @@ from utils.image_tokens import count_image_content_tokens
 from utils.log import logger
 
 CODEX_RESPONSES_MODEL = "gpt-5.5"
+NO_IMAGE_MODEL_CONFIG_ERROR = (
+    "no enabled image models configured. Please enable the system channel with weight > 0 "
+    "or configure a tool_call channel with base_url, api_key and mapped_models"
+)
 
 class ImageGenerationError(Exception):
     def __init__(
@@ -67,6 +71,12 @@ def public_image_error_message(message: str) -> str:
     if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
         return "The image generation request failed. Please try again later."
     return text or "The image generation request failed. Please try again later."
+
+
+def unsupported_image_model_message(models: set[str]) -> str:
+    if not models:
+        return NO_IMAGE_MODEL_CONFIG_ERROR
+    return "unsupported image model,supported models: " + ", ".join(sorted(models))
 
 
 def is_token_invalid_error(message: str) -> bool:
@@ -1273,7 +1283,7 @@ def _generate_single_image(
                 for model in item.get("mapped_models", [])
                 if str(model or "").strip()
             }
-            raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(channel_models)))
+            raise ImageGenerationError(unsupported_image_model_message(channel_models))
         account_started = time.time()
         try:
             if request.progress_callback:
@@ -1521,7 +1531,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
         if str(model or "").strip()
     }
     if str(request.model or "").strip().lower() not in {model.lower() for model in channel_models}:
-        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(channel_models)))
+        raise ImageGenerationError(unsupported_image_model_message(channel_models))
 
     if request.n <= 1:
         # 单张图片，直接执行（无需线程池开销）

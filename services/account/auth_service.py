@@ -2,21 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import secrets
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Literal
 
 from services.config import DATA_DIR, config
+from utils.date_utils import utc_now, utc_now_iso
+from utils.id_utils import short_id
+from utils.json_utils import read_json, write_json
+from utils.text_utils import clean_text
 
 AuthRole = Literal["admin", "user"]
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _hash_key(value: str) -> str:
@@ -33,7 +31,7 @@ class AuthService:
 
     @staticmethod
     def _clean(value: object) -> str:
-        return str(value or "").strip()
+        return clean_text(value)
 
     @staticmethod
     def _default_name(role: object) -> str:
@@ -48,9 +46,9 @@ class AuthService:
         key_hash = self._clean(raw.get("key_hash"))
         if not key_hash:
             return None
-        item_id = self._clean(raw.get("id")) or uuid.uuid4().hex[:12]
+        item_id = self._clean(raw.get("id")) or short_id()
         name = self._clean(raw.get("name")) or self._default_name(role)
-        created_at = self._clean(raw.get("created_at")) or _now_iso()
+        created_at = self._clean(raw.get("created_at")) or utc_now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
         return {
             "id": item_id,
@@ -66,7 +64,7 @@ class AuthService:
         try:
             if not self.auth_keys_file.exists():
                 return []
-            raw = json.loads(self.auth_keys_file.read_text(encoding="utf-8"))
+            raw = read_json(self.auth_keys_file, [])
             if isinstance(raw, dict):
                 raw = raw.get("items")
             items = raw if isinstance(raw, list) else []
@@ -75,10 +73,7 @@ class AuthService:
         return [normalized for item in items if (normalized := self._normalize_item(item)) is not None]
 
     def _save(self) -> None:
-        self.auth_keys_file.write_text(
-            json.dumps({"items": self._items}, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json(self.auth_keys_file, {"items": self._items})
 
     def _reload_locked(self) -> None:
         self._items = self._load()
@@ -167,12 +162,12 @@ class AuthService:
                 except ValueError:
                     continue
             item = {
-                "id": uuid.uuid4().hex[:12],
+                "id": short_id(),
                 "name": normalized_name,
                 "role": role,
                 "key_hash": key_hash,
                 "enabled": True,
-                "created_at": _now_iso(),
+                "created_at": utc_now_iso(),
                 "last_used_at": None,
             }
             self._items.append(item)
@@ -243,7 +238,7 @@ class AuthService:
                 if not stored_hash or not hmac.compare_digest(stored_hash, candidate_hash):
                     continue
                 next_item = dict(item)
-                now = datetime.now(timezone.utc)
+                now = utc_now()
                 next_item["last_used_at"] = now.isoformat()
                 self._items[index] = next_item
                 item_id = self._clean(next_item.get("id"))

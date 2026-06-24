@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -14,8 +11,11 @@ import httpx
 
 from services.account.account_service import account_service
 from services.config import DATA_DIR
+from utils.date_utils import utc_now_iso
+from utils.id_utils import hex_id, short_id
+from utils.json_utils import read_json, write_json
 from utils.log import logger
-
+from utils.text_utils import clean_text
 
 SUB2API_CONFIG_FILE = DATA_DIR / "sub2api_config.json"
 
@@ -24,29 +24,17 @@ SUB2API_CONFIG_FILE = DATA_DIR / "sub2api_config.json"
 _TOKEN_REFRESH_SKEW = 5 * 60
 
 
-def _new_id() -> str:
-    return uuid.uuid4().hex[:12]
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _clean(value: object) -> str:
-    return str(value or "").strip()
-
-
 def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
     if not isinstance(raw, dict):
         return None
-    status = _clean(raw.get("status")) or "failed"
+    status = clean_text(raw.get("status")) or "failed"
     if fail_unfinished and status in {"pending", "running"}:
         status = "failed"
     return {
-        "job_id": _clean(raw.get("job_id")) or uuid.uuid4().hex,
+        "job_id": clean_text(raw.get("job_id")) or hex_id(),
         "status": status,
-        "created_at": _clean(raw.get("created_at")) or _now_iso(),
-        "updated_at": _clean(raw.get("updated_at")) or _clean(raw.get("created_at")) or _now_iso(),
+        "created_at": clean_text(raw.get("created_at")) or utc_now_iso(),
+        "updated_at": clean_text(raw.get("updated_at")) or clean_text(raw.get("created_at")) or utc_now_iso(),
         "total": int(raw.get("total") or 0),
         "completed": int(raw.get("completed") or 0),
         "added": int(raw.get("added") or 0),
@@ -59,13 +47,13 @@ def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
 
 def _normalize_server(raw: dict) -> dict:
     return {
-        "id": _clean(raw.get("id")) or _new_id(),
-        "name": _clean(raw.get("name")),
-        "base_url": _clean(raw.get("base_url")),
-        "email": _clean(raw.get("email")),
-        "password": _clean(raw.get("password")),
-        "api_key": _clean(raw.get("api_key")),
-        "group_id": _clean(raw.get("group_id")),
+        "id": clean_text(raw.get("id")) or short_id(),
+        "name": clean_text(raw.get("name")),
+        "base_url": clean_text(raw.get("base_url")),
+        "email": clean_text(raw.get("email")),
+        "password": clean_text(raw.get("password")),
+        "api_key": clean_text(raw.get("api_key")),
+        "group_id": clean_text(raw.get("group_id")),
         "import_job": _normalize_import_job(raw.get("import_job"), fail_unfinished=True),
     }
 
@@ -80,7 +68,7 @@ class Sub2APIConfig:
         if not self._store_file.exists():
             return []
         try:
-            raw = json.loads(self._store_file.read_text(encoding="utf-8"))
+            raw = read_json(self._store_file)
             if isinstance(raw, list):
                 return [_normalize_server(item) for item in raw if isinstance(item, dict)]
         except Exception:
@@ -88,11 +76,7 @@ class Sub2APIConfig:
         return []
 
     def _save(self) -> None:
-        self._store_file.parent.mkdir(parents=True, exist_ok=True)
-        self._store_file.write_text(
-            json.dumps(self._servers, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json(self._store_file, self._servers)
 
     def list_servers(self) -> list[dict]:
         with self._lock:
@@ -106,17 +90,17 @@ class Sub2APIConfig:
         return None
 
     def add_server(
-        self,
-        *,
-        name: str,
-        base_url: str,
-        email: str,
-        password: str,
-        api_key: str,
-        group_id: str = "",
+            self,
+            *,
+            name: str,
+            base_url: str,
+            email: str,
+            password: str,
+            api_key: str,
+            group_id: str = "",
     ) -> dict:
         server = _normalize_server({
-            "id": _new_id(),
+            "id": short_id(),
             "name": name,
             "base_url": base_url,
             "email": email,
@@ -202,7 +186,7 @@ def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
     if not isinstance(body, dict):
         raise RuntimeError("sub2api login payload is invalid")
 
-    token = _clean(body.get("access_token"))
+    token = clean_text(body.get("access_token"))
     if not token:
         raise RuntimeError("sub2api login did not return access_token")
 
@@ -212,17 +196,17 @@ def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
 
 
 def _auth_headers(server: dict) -> dict[str, str]:
-    api_key = _clean(server.get("api_key"))
+    api_key = clean_text(server.get("api_key"))
     if api_key:
         return {"x-api-key": api_key, "Accept": "application/json"}
 
-    email = _clean(server.get("email"))
-    password = _clean(server.get("password"))
+    email = clean_text(server.get("email"))
+    password = clean_text(server.get("password"))
     if not email or not password:
         raise RuntimeError("sub2api server requires email+password or api_key")
 
-    server_id = _clean(server.get("id"))
-    base_url = _clean(server.get("base_url"))
+    server_id = clean_text(server.get("id"))
+    base_url = clean_text(server.get("base_url"))
 
     with _token_cache_lock:
         cached = _token_cache.get(server_id)
@@ -239,7 +223,7 @@ def _extract_access_token(credentials: object) -> str:
     if not isinstance(credentials, dict):
         return ""
     for key in ("access_token", "accessToken", "token"):
-        value = _clean(credentials.get(key))
+        value = clean_text(credentials.get(key))
         if value:
             return value
     return ""
@@ -254,11 +238,15 @@ def _extract_credentials(account: dict) -> dict:
 
 
 def _account_platform(account: dict, credentials: dict) -> str:
-    return (_clean(account.get("platform")) or _clean(credentials.get("platform"))).lower()
+    return (clean_text(account.get("platform")) or clean_text(credentials.get("platform"))).lower()
 
 
 def _account_type(account: dict, credentials: dict) -> str:
-    return (_clean(account.get("type")) or _clean(account.get("account_type")) or _clean(credentials.get("type"))).lower()
+    return (
+            clean_text(account.get("type"))
+            or clean_text(account.get("account_type"))
+            or clean_text(credentials.get("type"))
+    ).lower()
 
 
 def _looks_like_openai_account(account: dict, credentials: dict) -> bool:
@@ -299,12 +287,12 @@ def _extract_paged_items(payload: object) -> tuple[list, int]:
 
 def list_remote_accounts(server: dict) -> list[dict]:
     """Return a flat list of OpenAI OAuth accounts from a sub2api server."""
-    base_url = _clean(server.get("base_url"))
+    base_url = clean_text(server.get("base_url"))
     if not base_url:
         return []
 
     headers = _auth_headers(server)
-    group_id = _clean(server.get("group_id"))
+    group_id = clean_text(server.get("group_id"))
 
     session = httpx.Client(verify=True)
     items: list[dict] = []
@@ -319,7 +307,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
                 params["group"] = group_id
             logger.info({
                 "event": "sub2api_list_accounts_request",
-                "server": _clean(server.get("name")) or base_url,
+                "server": clean_text(server.get("name")) or base_url,
                 "page": page,
                 "group_id": group_id,
             })
@@ -336,7 +324,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
             data, total = _extract_paged_items(payload)
             logger.info({
                 "event": "sub2api_list_accounts_response",
-                "server": _clean(server.get("name")) or base_url,
+                "server": clean_text(server.get("name")) or base_url,
                 "page": page,
                 "items": len(data),
                 "total": total,
@@ -359,9 +347,9 @@ def list_remote_accounts(server: dict) -> list[dict]:
                     })
                 account_id = account.get("id")
                 normalized_id = str(account_id) if account_id is not None else (
-                    _clean(credentials.get("chatgpt_account_id"))
-                    or _clean(credentials.get("account_id"))
-                    or _clean(credentials.get("id"))
+                        clean_text(credentials.get("chatgpt_account_id"))
+                        or clean_text(credentials.get("account_id"))
+                        or clean_text(credentials.get("id"))
                 )
                 if not normalized_id:
                     logger.info({
@@ -371,12 +359,12 @@ def list_remote_accounts(server: dict) -> list[dict]:
                     continue
                 items.append({
                     "id": normalized_id,
-                    "name": _clean(account.get("name")),
-                    "email": _clean(credentials.get("email")) or _clean(account.get("name")),
-                    "plan_type": _clean(credentials.get("plan_type")),
-                    "status": _clean(account.get("status")),
-                    "expires_at": _clean(credentials.get("expires_at")),
-                    "has_refresh_token": bool(_clean(credentials.get("refresh_token"))),
+                    "name": clean_text(account.get("name")),
+                    "email": clean_text(credentials.get("email")) or clean_text(account.get("name")),
+                    "plan_type": clean_text(credentials.get("plan_type")),
+                    "status": clean_text(account.get("status")),
+                    "expires_at": clean_text(credentials.get("expires_at")),
+                    "has_refresh_token": bool(clean_text(credentials.get("refresh_token"))),
                 })
 
             if page * 200 >= total or len(data) < 200:
@@ -387,7 +375,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
 
     logger.info({
         "event": "sub2api_list_accounts_done",
-        "server": _clean(server.get("name")) or base_url,
+        "server": clean_text(server.get("name")) or base_url,
         "accounts": len(items),
     })
     return items
@@ -395,7 +383,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
 
 def list_remote_groups(server: dict) -> list[dict]:
     """Return OpenAI account groups from a sub2api server."""
-    base_url = _clean(server.get("base_url"))
+    base_url = clean_text(server.get("base_url"))
     if not base_url:
         return []
 
@@ -431,10 +419,10 @@ def list_remote_groups(server: dict) -> list[dict]:
                     continue
                 items.append({
                     "id": str(group_id),
-                    "name": _clean(group.get("name")),
-                    "description": _clean(group.get("description")),
-                    "platform": _clean(group.get("platform")),
-                    "status": _clean(group.get("status")),
+                    "name": clean_text(group.get("name")),
+                    "description": clean_text(group.get("description")),
+                    "platform": clean_text(group.get("platform")),
+                    "status": clean_text(group.get("status")),
                     "account_count": int(group.get("account_count") or 0),
                     "active_account_count": int(group.get("active_account_count") or 0),
                 })
@@ -450,7 +438,7 @@ def list_remote_groups(server: dict) -> list[dict]:
 
 def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> list[str]:
     """Return access_tokens for sub2api account ids."""
-    base_url = _clean(server.get("base_url"))
+    base_url = clean_text(server.get("base_url"))
     headers = _auth_headers(server)
 
     session = httpx.Client(verify=True)
@@ -494,16 +482,16 @@ class Sub2APIImportService:
         self._config = sub2api_config
 
     def start_import(self, server: dict, account_ids: list[str]) -> dict:
-        ids = [_clean(item) for item in account_ids if _clean(item)]
+        ids = [clean_text(item) for item in account_ids if clean_text(item)]
         if not ids:
             raise ValueError("account ids is required")
 
-        server_id = _clean(server.get("id"))
+        server_id = clean_text(server.get("id"))
         job = {
-            "job_id": uuid.uuid4().hex,
+            "job_id": hex_id(),
             "status": "pending",
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
             "total": len(ids),
             "completed": 0,
             "added": 0,
@@ -529,7 +517,7 @@ class Sub2APIImportService:
         current = self._config.get_import_job(server_id)
         if current is None:
             return
-        next_job = {**current, **updates, "updated_at": _now_iso()}
+        next_job = {**current, **updates, "updated_at": utc_now_iso()}
         self._config.set_import_job(server_id, next_job)
 
     def _append_error(self, server_id: str, account_id: str, message: str) -> None:

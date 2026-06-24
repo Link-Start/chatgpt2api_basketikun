@@ -25,28 +25,25 @@ import {
   type CPAPool,
   type CPARemoteFile,
   type ImageStorageSettings,
+  type InfiniteCanvasSettings,
   type ProxyRuntimeSettings,
   type RegisterConfig,
   type SettingsConfig,
-  type ThirdPartyAppsSettings,
 } from "@/lib/api";
 
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
-const DEFAULT_THIRD_PARTY_APPS: ThirdPartyAppsSettings = {
-  infinite_canvas: {
-    enabled: false,
-    url: "https://canvas.best",
-  },
+const DEFAULT_INFINITE_CANVAS: InfiniteCanvasSettings = {
+  enabled: false,
+  url: "https://canvas.best",
 };
 
 const DEFAULT_CODEX_CHANNELS: CodexChannelsSettings = {
   channels: [],
 };
 
-const CODEX_SYSTEM_MODEL = "gpt-image-2";
 
 function normalizeMappedModel(channel: Partial<CodexChannel>) {
   return String(channel.mapped_model || channel.mapped_models?.[0] || "").trim();
@@ -124,7 +121,7 @@ type SettingsStore = {
   setProxyRuntimeField: <K extends keyof ProxyRuntimeSettings>(key: K, value: ProxyRuntimeSettings[K]) => void;
   setProxyRuntimeClearanceField: <K extends keyof ProxyRuntimeSettings["clearance"]>(key: K, value: ProxyRuntimeSettings["clearance"][K]) => void;
   setProxyRuntimeStatusCodesText: (value: string) => void;
-  setInfiniteCanvasField: <K extends keyof ThirdPartyAppsSettings["infinite_canvas"]>(key: K, value: ThirdPartyAppsSettings["infinite_canvas"][K]) => void;
+  setInfiniteCanvasField: <K extends keyof InfiniteCanvasSettings>(key: K, value: InfiniteCanvasSettings[K]) => void;
   addCodexChannel: () => void;
   updateCodexChannel: (id: string, updates: Partial<CodexChannel>) => void;
   deleteCodexChannel: (id: string) => void;
@@ -277,23 +274,34 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
             refresh_interval: Math.max(60, Number(config.proxy_runtime.clearance.refresh_interval)),
           },
         },
-        third_party_apps: {
-          infinite_canvas: {
-            enabled: Boolean(config.third_party_apps.infinite_canvas.enabled),
-            url: config.third_party_apps.infinite_canvas.url.trim(),
-          },
+        infinite_canvas: {
+          enabled: Boolean(config.infinite_canvas.enabled),
+          url: config.infinite_canvas.url.trim(),
         },
         codex_channels: {
-          channels: (config.codex_channels || DEFAULT_CODEX_CHANNELS).channels.map((channel) => ({
-            ...channel,
-            name: String(channel.name || "").trim(),
-            base_url: String(channel.base_url || "").trim(),
-            api_key: String(channel.api_key || "").trim(),
-            weight: Math.max(0, Number(channel.weight) || 0),
-            mapped_model: channel.type === "system" ? CODEX_SYSTEM_MODEL : normalizeMappedModel(channel),
-            mapped_models: [channel.type === "system" ? CODEX_SYSTEM_MODEL : normalizeMappedModel(channel)].filter(Boolean),
-            model_prefix: String(channel.model_prefix || "").trim().toLowerCase(),
-          })),
+          channels: (config.codex_channels || DEFAULT_CODEX_CHANNELS).channels.map((channel) => {
+            const weight = Math.max(0, Number(channel.weight) || 0);
+            if (channel.type === "system") {
+              return {
+                id: channel.id,
+                type: "system" as const,
+                enabled: true,
+                name: String(channel.name || "系统渠道").trim(),
+                weight,
+              };
+            }
+            const mappedModel = normalizeMappedModel(channel);
+            return {
+              ...channel,
+              name: String(channel.name || "").trim(),
+              base_url: String(channel.base_url || "").trim(),
+              api_key: String(channel.api_key || "").trim(),
+              weight,
+              mapped_model: mappedModel,
+              mapped_models: [mappedModel].filter(Boolean),
+              model_prefix: String(channel.model_prefix || "").trim().toLowerCase(),
+            };
+          }),
         },
       });
       set({
@@ -494,20 +502,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setInfiniteCanvasField: (key, value) => {
     set((state) => {
-      if (!state.config) {
-        return {};
-      }
-      const apps = state.config.third_party_apps || DEFAULT_THIRD_PARTY_APPS;
+      if (!state.config) return {};
+      const canvas = state.config.infinite_canvas || DEFAULT_INFINITE_CANVAS;
       return {
         config: {
           ...state.config,
-          third_party_apps: {
-            ...apps,
-            infinite_canvas: {
-              ...apps.infinite_canvas,
-              [key]: value,
-            },
-          },
+          infinite_canvas: { ...canvas, [key]: value },
         },
       };
     });
@@ -561,8 +561,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
                 return channel;
               }
               const next = { ...channel, ...updates };
+              if (next.type === "system") {
+                return next;
+              }
               const prefix = String(next.model_prefix || "").trim().toLowerCase();
-              const mappedModel = next.type === "system" ? CODEX_SYSTEM_MODEL : normalizeMappedModel(next);
+              const mappedModel = normalizeMappedModel(next);
               return {
                 ...next,
                 model_prefix: prefix,

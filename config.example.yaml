@@ -1,17 +1,16 @@
+# ── 基础配置 ────────────────────────────────────────────────────────────────
+
 # 账号刷新间隔，单位秒。账号刷新完成后需等待该时间才会再次刷新。
 refresh_account_interval_seconds: 60
 
-# 本地图片保留天数，超过后启动时会自动清理。
-image_retention_days: 15
-
-# 图片任务轮询上游结果的最长等待时间，单位秒。
-image_poll_timeout_secs: 120
-
-# 是否自动移除限流账号。一般不建议开启，避免误删临时限流账号。
-auto_remove_rate_limited_accounts: false
+# 旧版全局代理。留空表示不使用。
+proxy: ""
 
 # 是否自动移除已判定无效的账号。
 auto_remove_invalid_accounts: true
+
+# 是否自动移除限流账号。一般不建议开启，避免误删临时限流账号。
+auto_remove_rate_limited_accounts: false
 
 # 控制台日志级别。
 log_levels:
@@ -20,10 +19,80 @@ log_levels:
   - info
   - warning
 
-# 旧版全局代理。留空表示不使用。
-proxy: ""
+# ── 内容审核 ────────────────────────────────────────────────────────────────
 
-# 稳定代理运行时配置，主要用于 WARP / FlareSolverr 场景。
+# 每次请求注入的全局 system 指令。
+global_system_prompt: ""
+
+# ── 图片设置 ────────────────────────────────────────────────────────────────
+
+# 对外访问基础地址，用于生成图片 URL。留空时按请求来源推断。
+base_url: ""
+
+# 本地图片保留天数，超过后启动时会自动清理。
+image_retention_days: 15
+
+# 图片任务轮询上游结果的最长等待时间，单位秒。
+image_poll_timeout_secs: 120
+
+# 每个账号同时处理的图片请求数。
+image_account_concurrency: 3
+
+# 图片二次确认机制。开启后找到图片后会等待一小段时间再确认。
+image_settle_enabled: false
+image_check_before_hit_enabled: false
+
+# 图片二次确认等待时间，单位秒。需配合 image_settle_enabled 使用。
+image_settle_secs: 2
+
+# 图片任务超时后点击继续等待的额外等待时间，单位秒。
+image_timeout_retry_secs: 30
+
+# 图片文件外部存储配置。
+image_storage:
+  # false 表示只存本地。
+  enabled: false
+
+  # local：只本地；webdav：只 WebDAV；both：本地和 WebDAV 都保存。
+  mode: local
+  webdav_url: ""
+  webdav_username: ""
+  webdav_password: ""
+
+  # WebDAV 根目录。
+  webdav_root_path: chatgpt2api/images
+
+  # WebDAV 文件的公开访问地址前缀。
+  public_base_url: ""
+
+# ── 图片高级参数 ─────────────────────────────────────────────────────────────
+
+# 是否允许多账号并行处理图片任务。
+image_parallel_generation: true
+
+# 图片结果轮询间隔，单位秒。
+image_poll_interval_secs: 10
+
+# 图片任务创建后首次轮询前的等待时间，单位秒。
+image_poll_initial_wait_secs: 10
+
+# 图片清理目标剩余空间，单位 MB。
+image_min_free_mb: 500
+
+# ── Chat Completions 缓存 ────────────────────────────────────────────────────
+
+chat_completion_cache:
+  enabled: true
+  ttl_seconds: 60
+  max_entries: 256
+  dedupe_inflight: true
+  stream_cache: true
+  normalize_messages: true
+  drop_adjacent_duplicates: true
+  drop_assistant_history: false
+
+# ── FlareSolverr（稳定代理运行时） ──────────────────────────────────────────
+
 proxy_runtime:
   # 是否启用稳定代理运行时。
   enabled: false
@@ -72,78 +141,15 @@ proxy_runtime:
     # 启动时是否预热 clearance。
     warm_up_on_start: true
 
-# 对外访问基础地址，用于生成图片 URL。留空时按请求来源推断。
-base_url: ""
+# ── 画布入口 ─────────────────────────────────────────────────────────────────
 
-# 每次请求注入的全局 system 指令。
-global_system_prompt: ""
-
-# AI 审核配置。关闭时不进行审核。
-ai_review:
-  enabled: false
-  base_url: ""
-  api_key: ""
-  model: ""
-  prompt: ""
-
-# 每个账号同时处理的图片请求数。
-image_account_concurrency: 3
-
-# 是否允许多账号并行处理图片任务。
-image_parallel_generation: true
-
-# 图片结果轮询间隔，单位秒。
-image_poll_interval_secs: 10
-
-# 图片任务创建后首次轮询前的等待时间，单位秒。
-image_poll_initial_wait_secs: 10
-
-# 图片文件外部存储配置。
-image_storage:
-  # false 表示只存本地。
-  enabled: false
-
-  # local：只本地；webdav：只 WebDAV；both：本地和 WebDAV 都保存。
-  mode: local
-  webdav_url: ""
-  webdav_username: ""
-  webdav_password: ""
-
-  # WebDAV 根目录。
-  webdav_root_path: chatgpt2api/images
-
-  # WebDAV 文件的公开访问地址前缀。
-  public_base_url: ""
-
-# 图片清理目标剩余空间，单位 MB。
-image_min_free_mb: 500
-
-# Chat Completions 缓存配置。
-chat_completion_cache:
+infinite_canvas:
   enabled: true
-  ttl_seconds: 60
-  max_entries: 256
-  dedupe_inflight: true
-  stream_cache: true
-  normalize_messages: true
-  drop_adjacent_duplicates: true
-  drop_assistant_history: false
+  url: https://canvas.best
 
-# 图片二次确认机制。开启后找到图片后会等待一小段时间再确认。
-image_settle_enabled: false
-image_check_before_hit_enabled: false
-image_settle_secs: 2
+# ── 生图渠道 ─────────────────────────────────────────────────────────────────
 
-# 图片任务超时后点击继续等待的额外等待时间，单位秒。
-image_timeout_retry_secs: 30
-
-# 第三方入口配置。
-third_party_apps:
-  infinite_canvas:
-    enabled: true
-    url: https://canvas.best
-
-# 生图渠道。type: system 走本系统逆向；tool_call 走第三方中转站工具调用。
+# type: system 走本系统账号池逆向；tool_call 走第三方中转站工具调用。
 codex_channels:
   channels:
     - id: system
@@ -151,9 +157,6 @@ codex_channels:
       enabled: true
       name: 系统渠道
       weight: 1
-      mapped_models:
-        - gpt-image-2
-      mapped_model: gpt-image-2
     - enabled: false
       type: tool_call
       name: 示例工具调用中转站

@@ -10,7 +10,7 @@ import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, Di
 import { Sheet, SheetClose, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { VersionReleaseDialog } from "@/components/version-release-dialog";
 import webConfig from "@/constants/common-env";
-import { fetchThirdPartyApps, type ThirdPartyAppsSettings } from "@/lib/api";
+import { fetchThirdPartyApps, type InfiniteCanvasSettings } from "@/lib/api";
 import { getValidatedAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
@@ -83,7 +83,7 @@ export function TopNav({
   const navigate = useNavigate();
   const pathname = location.pathname;
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
-  const [thirdPartyApps, setThirdPartyApps] = useState<ThirdPartyAppsSettings | null>(null);
+  const [thirdPartyApps, setThirdPartyApps] = useState<InfiniteCanvasSettings | null>(null);
   const [isCanvasDialogOpen, setIsCanvasDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -120,7 +120,7 @@ export function TopNav({
       try {
         const data = await fetchThirdPartyApps();
         if (active) {
-          setThirdPartyApps(data.third_party_apps);
+          setThirdPartyApps(data.infinite_canvas);
         }
       } catch {
         if (active) {
@@ -151,7 +151,7 @@ export function TopNav({
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
   const displayName = session.name.trim() || roleLabel;
   const baseUrl = webConfig.apiUrl.replace(/\/$/, "") || window.location.origin;
-  const canvas = thirdPartyApps?.infinite_canvas;
+  const canvas = thirdPartyApps;
   const canvasHref = canvas?.enabled && canvas.url.trim() ? buildThirdPartyHref(canvas.url, baseUrl, session.key) : "";
   const canvasDisplayHref = canvasHref ? decodeURIComponent(canvasHref) : "";
 

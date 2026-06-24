@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import threading
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -15,30 +12,25 @@ import httpx
 from services.account.account_service import account_service
 from services.config import DATA_DIR
 from services.proxy_service import proxy_settings
-
+from utils.date_utils import utc_now_iso
+from utils.id_utils import hex_id, short_id
+from utils.json_utils import read_json, write_json
+from utils.text_utils import clean_text
 
 CPA_CONFIG_FILE = DATA_DIR / "cpa_config.json"
-
-
-def _new_id() -> str:
-    return uuid.uuid4().hex[:12]
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
     if not isinstance(raw, dict):
         return None
-    status = str(raw.get("status") or "failed").strip() or "failed"
+    status = clean_text(raw.get("status"), "failed")
     if fail_unfinished and status in {"pending", "running"}:
         status = "failed"
     return {
-        "job_id": str(raw.get("job_id") or uuid.uuid4().hex).strip(),
+        "job_id": clean_text(raw.get("job_id")) or hex_id(),
         "status": status,
-        "created_at": str(raw.get("created_at") or _now_iso()).strip() or _now_iso(),
-        "updated_at": str(raw.get("updated_at") or raw.get("created_at") or _now_iso()).strip() or _now_iso(),
+        "created_at": str(raw.get("created_at") or utc_now_iso()).strip() or utc_now_iso(),
+        "updated_at": str(raw.get("updated_at") or raw.get("created_at") or utc_now_iso()).strip() or utc_now_iso(),
         "total": int(raw.get("total") or 0),
         "completed": int(raw.get("completed") or 0),
         "added": int(raw.get("added") or 0),
@@ -51,10 +43,10 @@ def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
 
 def _normalize_pool(raw: dict) -> dict:
     return {
-        "id": str(raw.get("id") or _new_id()).strip(),
-        "name": str(raw.get("name") or "").strip(),
-        "base_url": str(raw.get("base_url") or "").strip(),
-        "secret_key": str(raw.get("secret_key") or "").strip(),
+        "id": clean_text(raw.get("id")) or short_id(),
+        "name": clean_text(raw.get("name")),
+        "base_url": clean_text(raw.get("base_url")),
+        "secret_key": clean_text(raw.get("secret_key")),
         "import_job": _normalize_import_job(raw.get("import_job"), fail_unfinished=True),
     }
 
@@ -76,7 +68,7 @@ class CPAConfig:
         if not self._store_file.exists():
             return []
         try:
-            raw = json.loads(self._store_file.read_text(encoding="utf-8"))
+            raw = read_json(self._store_file)
             if isinstance(raw, dict) and "base_url" in raw:
                 pool = _normalize_pool(raw)
                 return [pool] if pool["base_url"] else []
@@ -87,8 +79,7 @@ class CPAConfig:
         return []
 
     def _save(self) -> None:
-        self._store_file.parent.mkdir(parents=True, exist_ok=True)
-        self._store_file.write_text(json.dumps(self._pools, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json(self._store_file, self._pools)
 
     def list_pools(self) -> list[dict]:
         with self._lock:
@@ -102,7 +93,7 @@ class CPAConfig:
         return None
 
     def add_pool(self, name: str, base_url: str, secret_key: str) -> dict:
-        pool = _normalize_pool({"id": _new_id(), "name": name, "base_url": base_url, "secret_key": secret_key})
+        pool = _normalize_pool({"id": short_id(), "name": name, "base_url": base_url, "secret_key": secret_key})
         with self._lock:
             self._pools.append(pool)
             self._save()
@@ -150,8 +141,8 @@ class CPAConfig:
 
 
 def list_remote_files(pool: dict) -> list[dict]:
-    base_url = str(pool.get("base_url") or "").strip()
-    secret_key = str(pool.get("secret_key") or "").strip()
+    base_url = clean_text(pool.get("base_url"))
+    secret_key = clean_text(pool.get("secret_key"))
     if not base_url or not secret_key:
         return []
 
@@ -173,8 +164,8 @@ def list_remote_files(pool: dict) -> list[dict]:
     for item in files:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name") or "").strip()
-        email = str(item.get("email") or item.get("account") or "").strip()
+        name = clean_text(item.get("name"))
+        email = clean_text(item.get("email") or item.get("account"))
         if not name:
             continue
         items.append({"name": name, "email": email})
@@ -182,9 +173,9 @@ def list_remote_files(pool: dict) -> list[dict]:
 
 
 def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, str | None]:
-    base_url = str(pool.get("base_url") or "").strip()
-    secret_key = str(pool.get("secret_key") or "").strip()
-    file_name = str(file_name or "").strip()
+    base_url = clean_text(pool.get("base_url"))
+    secret_key = clean_text(pool.get("secret_key"))
+    file_name = clean_text(file_name)
     if not base_url or not secret_key or not file_name:
         return None, "invalid request"
 
@@ -203,7 +194,7 @@ def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, s
     if not isinstance(payload, dict):
         return None, "invalid payload"
 
-    access_token = str(payload.get("access_token") or "").strip()
+    access_token = clean_text(payload.get("access_token"))
     if not access_token:
         return None, "missing access_token"
     return access_token, None
@@ -214,16 +205,16 @@ class CPAImportService:
         self._config = cpa_config
 
     def start_import(self, pool: dict, selected_files: list[str]) -> dict:
-        names = [str(name or "").strip() for name in selected_files if str(name or "").strip()]
+        names = [clean_text(name) for name in selected_files if clean_text(name)]
         if not names:
             raise ValueError("selected files is required")
 
-        pool_id = str(pool.get("id") or "").strip()
+        pool_id = clean_text(pool.get("id"))
         job = {
-            "job_id": uuid.uuid4().hex,
+            "job_id": hex_id(),
             "status": "pending",
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
+            "created_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
             "total": len(names),
             "completed": 0,
             "added": 0,
@@ -249,7 +240,7 @@ class CPAImportService:
         current = self._config.get_import_job(pool_id)
         if current is None:
             return None
-        next_job = {**current, **updates, "updated_at": _now_iso()}
+        next_job = {**current, **updates, "updated_at": utc_now_iso()}
         pool = self._config.set_import_job(pool_id, next_job)
         if pool is None:
             return None

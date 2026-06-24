@@ -5,7 +5,6 @@ import json
 import itertools
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
 from services.protocol.error_response import anthropic_error_response, openai_error_response
+from utils.date_utils import local_now_text, local_timestamp_text
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
@@ -63,7 +63,7 @@ class LogService:
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": local_now_text(),
             "type": type,
             "summary": summary,
             "detail": detail or data,
@@ -327,8 +327,8 @@ class LoggedCall:
             "role": self.identity.get("role"),
             "endpoint": self.endpoint,
             "model": self.model,
-            "started_at": datetime.fromtimestamp(self.started).strftime("%Y-%m-%d %H:%M:%S"),
-            "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "started_at": local_timestamp_text(self.started),
+            "ended_at": local_now_text(),
             "duration_ms": int((time.time() - self.started) * 1000),
             "status": status,
         }

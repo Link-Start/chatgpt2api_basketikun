@@ -121,9 +121,9 @@ def create_router(app_version: str) -> APIRouter:
         return {"config": config.get()}
 
     @router.get("/api/third-party-apps")
-    async def get_third_party_apps(authorization: str | None = Header(default=None)):
+    async def get_infinite_canvas(authorization: str | None = Header(default=None)):
         require_identity(authorization)
-        return {"third_party_apps": config.get_third_party_apps_settings()}
+        return {"infinite_canvas": config.get_infinite_canvas_settings()}
 
     @router.post("/api/settings")
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):

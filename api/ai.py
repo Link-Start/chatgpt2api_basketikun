@@ -73,18 +73,12 @@ def create_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
-    async def list_models(authorization: str | None = Header(default=None)):
+    async def list_models(type: str | None = None, authorization: str | None = Header(default=None)):
         require_identity(authorization)
         try:
-            return await run_in_threadpool(openai_v1_models.list_models)
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
-
-    @router.get("/api/image-models")
-    async def list_image_models(authorization: str | None = Header(default=None)):
-        require_identity(authorization)
-        try:
-            return await run_in_threadpool(openai_v1_models.list_image_models)
+            return await run_in_threadpool(openai_v1_models.get_models, type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 

@@ -128,11 +128,9 @@ export type ProxyRuntimeStatus = {
   cached_clearance_hosts: string[];
 };
 
-export type ThirdPartyAppsSettings = {
-  infinite_canvas: {
-    enabled: boolean;
-    url: string;
-  };
+export type InfiniteCanvasSettings = {
+  enabled: boolean;
+  url: string;
 };
 
 export type CodexChannel = {
@@ -140,12 +138,12 @@ export type CodexChannel = {
   type: "system" | "tool_call";
   enabled: boolean;
   name: string;
-  base_url: string;
-  api_key: string;
-  upstream_model: "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | string;
+  base_url?: string;
+  api_key?: string;
+  upstream_model?: "gpt-5.5" | "gpt-5.4" | "gpt-5.4-mini" | string;
   weight: number | string;
-  mapped_models: string[];
-  model_prefix: string;
+  mapped_models?: string[];
+  model_prefix?: string;
   mapped_model?: string;
 };
 
@@ -183,7 +181,7 @@ export type SettingsConfig = {
   log_levels?: string[];
   image_storage: ImageStorageSettings;
   proxy_runtime: ProxyRuntimeSettings;
-  third_party_apps: ThirdPartyAppsSettings;
+  infinite_canvas: InfiniteCanvasSettings;
   codex_channels: CodexChannelsSettings;
   [key: string]: unknown;
 };
@@ -357,11 +355,11 @@ export async function fetchAccounts() {
 }
 
 export async function fetchModels() {
-  return httpRequest<ModelListResponse>("/v1/models");
+  return httpRequest<ModelListResponse>("/api/models?type=text");
 }
 
 export async function fetchImageModels() {
-  return httpRequest<ModelListResponse>("/api/image-models");
+  return httpRequest<ModelListResponse>("/api/models?type=image");
 }
 
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
@@ -606,7 +604,7 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
 }
 
 export async function fetchThirdPartyApps() {
-  return httpRequest<{ third_party_apps: ThirdPartyAppsSettings }>("/api/third-party-apps");
+  return httpRequest<{ infinite_canvas: InfiniteCanvasSettings }>("/api/third-party-apps");
 }
 
 export async function testCodexChannel(channel: { type: string; base_url: string; api_key: string; upstream_model: string; prompt: string }) {
