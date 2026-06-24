@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
-from utils.http_client import HttpClient
+import httpx
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.config import DATA_DIR
 from utils.log import logger
 
@@ -184,7 +184,7 @@ _token_cache_lock = Lock()
 
 def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
     url = f"{base_url.rstrip('/')}/api/v1/auth/login"
-    session = HttpClient(verify=True)
+    session = httpx.Client(verify=True)
     try:
         response = session.post(
             url,
@@ -306,7 +306,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
     headers = _auth_headers(server)
     group_id = _clean(server.get("group_id"))
 
-    session = HttpClient(verify=True)
+    session = httpx.Client(verify=True)
     items: list[dict] = []
     try:
         page = 1
@@ -401,7 +401,7 @@ def list_remote_groups(server: dict) -> list[dict]:
 
     headers = _auth_headers(server)
 
-    session = HttpClient(verify=True)
+    session = httpx.Client(verify=True)
     items: list[dict] = []
     try:
         page = 1
@@ -453,7 +453,7 @@ def _fetch_access_tokens_for_accounts(server: dict, account_ids: list[str]) -> l
     base_url = _clean(server.get("base_url"))
     headers = _auth_headers(server)
 
-    session = HttpClient(verify=True)
+    session = httpx.Client(verify=True)
     try:
         response = session.get(
             f"{base_url.rstrip('/')}/api/v1/admin/accounts/data",

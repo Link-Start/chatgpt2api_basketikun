@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
-from utils.http_client import HttpClient
+import httpx
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.config import DATA_DIR
 from services.proxy_service import proxy_settings
 
@@ -156,7 +156,7 @@ def list_remote_files(pool: dict) -> list[dict]:
         return []
 
     url = f"{base_url.rstrip('/')}/v0/management/auth-files"
-    session = HttpClient(**proxy_settings.build_client_kwargs(verify=True))
+    session = httpx.Client(**proxy_settings.build_client_kwargs(verify=True))
     try:
         response = session.get(url, headers=_management_headers(secret_key), timeout=30)
         if not response.is_success:
@@ -189,7 +189,7 @@ def fetch_remote_access_token(pool: dict, file_name: str) -> tuple[str | None, s
         return None, "invalid request"
 
     url = f"{base_url.rstrip('/')}/v0/management/auth-files/download"
-    session = HttpClient(**proxy_settings.build_client_kwargs(verify=True))
+    session = httpx.Client(**proxy_settings.build_client_kwargs(verify=True))
     try:
         response = session.get(url, headers=_management_headers(secret_key), params={"name": file_name}, timeout=30)
         if not response.is_success:

@@ -14,7 +14,7 @@ from email.utils import parsedate_to_datetime
 from threading import Lock
 from typing import Any, Callable, TypeVar
 
-from utils.http_client import HttpClient
+import httpx
 
 
 from services.config import DATA_DIR
@@ -252,10 +252,10 @@ def _normalize_string_list(value: Any) -> list[str]:
 
 def _create_session(conf: dict):
     proxy = str(conf.get("proxy") or "").strip()
-    kwargs = {"fingerprint": "chrome", "verify": False}
+    kwargs: dict[str, object] = {"verify": False}
     if proxy:
         kwargs["proxy"] = proxy
-    return HttpClient(**kwargs)
+    return httpx.Client(**kwargs)
 
 
 def _parse_received_at(value: Any) -> datetime | None:

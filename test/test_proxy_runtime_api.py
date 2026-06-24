@@ -104,7 +104,7 @@ class ProxyRuntimeApiTests(unittest.TestCase):
             mock.patch.object(system_module, "test_proxy", fake_test_proxy),
             mock.patch.object(system_module, "test_clearance", fake_test_clearance, create=True),
             mock.patch.object(system_module, "proxy_settings", self.fake_proxy_settings, create=True),
-            mock.patch("services.account_service.account_service", FakeAccountService()),
+            mock.patch("services.account.account_service.account_service", FakeAccountService()),
         ]
         for patcher in self.patchers:
             patcher.start()

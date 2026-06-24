@@ -16,10 +16,10 @@ from typing import Any, Dict, Iterator, Optional
 from urllib.parse import unquote, urlparse
 
 import httpx
-from utils.http_client import HttpClient
+from curl_cffi import requests as curl_requests
 from PIL import Image
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
@@ -172,9 +172,9 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
-        self.session = HttpClient(**proxy_settings.build_client_kwargs(
+        self.session = curl_requests.Session(**proxy_settings.build_client_kwargs(
             account=self.account,
-            fingerprint=self.fp["impersonate"],
+            impersonate=self.fp["impersonate"],
             verify=True,
         ))
         self.session.headers.update({

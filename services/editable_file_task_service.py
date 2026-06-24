@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.config import DATA_DIR
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service

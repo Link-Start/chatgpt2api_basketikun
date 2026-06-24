@@ -11,7 +11,7 @@ from typing import Callable, Mapping
 from urllib import request as urllib_request
 from urllib.parse import quote, urlparse
 
-from utils.http_client import HttpClient
+import httpx
 
 from services.config import config
 
@@ -565,7 +565,7 @@ def test_proxy(url: str = "", *, timeout: float = 15.0) -> dict:
             "error": "invalid proxy url",
             **result_base,
         }
-    session = HttpClient(fingerprint="edge101", verify=True, proxy=candidate)
+    session = httpx.Client(verify=True, proxy=candidate)
     started = time.perf_counter()
     try:
         response = session.get(

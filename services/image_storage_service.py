@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from urllib.parse import quote, urlparse
 
-from utils.http_client import HttpClient
+import httpx
 from fastapi import HTTPException
 from PIL import Image
 
@@ -107,7 +107,7 @@ class WebDAVClient:
         self.username = _clean(settings.get("webdav_username"))
         self.password = _clean(settings.get("webdav_password"))
         self.root_path = _clean(settings.get("webdav_root_path")).strip("/")
-        self.session = HttpClient()
+        self.session = httpx.Client()
 
     def _auth_kwargs(self) -> dict[str, object]:
         return {"auth": (self.username, self.password)} if self.username or self.password else {}

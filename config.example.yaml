@@ -1,5 +1,5 @@
-# 账号刷新间隔，单位分钟。
-refresh_account_interval_minute: 5
+# 账号刷新间隔，单位秒。账号刷新完成后需等待该时间才会再次刷新。
+refresh_account_interval_seconds: 300
 
 # 本地图片保留天数，超过后启动时会自动清理。
 image_retention_days: 15

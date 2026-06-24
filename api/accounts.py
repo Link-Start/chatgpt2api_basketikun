@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import io
 import json
 import re
-import uuid
 import zipfile
 from datetime import datetime
 from typing import Any, Literal
@@ -14,7 +12,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from services.auth_service import auth_service
+from services.account.auth_service import auth_service
 
 from api.support import (
     require_admin,
@@ -23,10 +21,10 @@ from api.support import (
     sanitize_sub2api_server,
     sanitize_sub2api_servers,
 )
-from services.account_service import account_service
-from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
-from services.oauth_login_service import OAuthLoginError, oauth_login_service
-from services.sub2api_service import (
+from services.account.account_service import account_service
+from services.account.cpa_service import cpa_config, cpa_import_service, list_remote_files
+from services.account.oauth_login_service import OAuthLoginError, oauth_login_service
+from services.account.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
     sub2api_config,
@@ -245,7 +243,8 @@ def create_router() -> APIRouter:
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        account_service.delete_accounts(tokens)
+        return {"ok": True}
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
@@ -255,26 +254,7 @@ def create_router() -> APIRouter:
             access_tokens = account_service.list_tokens()
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-
-        progress_id = str(uuid.uuid4())
-
-        async def _do_refresh():
-            try:
-                await run_in_threadpool(account_service.refresh_accounts, access_tokens, progress_id, False)
-            except Exception as e:
-                account_service.finish_refresh_progress(progress_id, error=str(e))
-
-        asyncio.create_task(_do_refresh())
-
-        return {"progress_id": progress_id}
-
-    @router.get("/api/accounts/refresh/progress/{progress_id}")
-    async def get_refresh_progress(progress_id: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        progress = account_service.get_refresh_progress(progress_id)
-        if progress is None:
-            raise HTTPException(status_code=404, detail={"error": "progress not found"})
-        return progress
+        return await run_in_threadpool(account_service.refresh_accounts, access_tokens, False)
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):

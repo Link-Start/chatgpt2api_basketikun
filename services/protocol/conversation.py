@@ -10,7 +10,7 @@ from typing import Any, Iterable, Iterator
 
 import tiktoken
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.codex_api import  CodexAPI
 from services.config import CODEX_SYSTEM_TYPE, CODEX_TOOL_CALL_TYPE, config
 from services.image_storage_service import image_storage_service

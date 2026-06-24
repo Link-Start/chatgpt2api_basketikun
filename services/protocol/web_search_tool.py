@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
 
 WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview", "web_search_preview_2025_03_11"}

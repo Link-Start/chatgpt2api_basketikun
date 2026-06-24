@@ -10,7 +10,6 @@ from typing import Any, TypeGuard
 from urllib.parse import unquote, unquote_to_bytes, urlparse
 
 import httpx
-from utils.http_client import http_client
 from fastapi import HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -265,7 +264,7 @@ def _download_image_url(url: str) -> ImageInput:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=400, detail={"error": "image_url must be an http or https URL"})
     try:
-        response = http_client.get(
+        response = httpx.get(
             source,
             headers={"Accept": "image/*,*/*;q=0.8", "User-Agent": "chatgpt2api image fetcher"},
             timeout=60,

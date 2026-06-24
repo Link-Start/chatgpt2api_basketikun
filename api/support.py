@@ -5,8 +5,8 @@ from threading import Event, Thread
 
 from fastapi import HTTPException, Request
 
-from services.account_service import account_service
-from services.auth_service import auth_service
+from services.account.account_service import account_service
+from services.account.auth_service import auth_service
 from services.config import config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -80,7 +80,7 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
-    interval_seconds = config.refresh_account_interval_minute * 60
+    interval_seconds = config.refresh_account_interval_seconds
 
     def worker() -> None:
         while not stop_event.is_set():

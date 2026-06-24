@@ -28,19 +28,16 @@ services:
     restart: "no"
 
   warp-proxy:
-    image: caomingjun/warp:latest
+    image: ghcr.io/ccbkkb/microwarp:latest
     container_name: chatgpt2api-warp-proxy
     restart: unless-stopped
-    environment:
-      WARP_SLEEP: "2"
-      # 可选：填写 Cloudflare WARP+ License Key
-      # WARP_LICENSE_KEY: ${WARP_LICENSE_KEY:-}
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     sysctls:
-      net.ipv6.conf.all.disable_ipv6: 0
       net.ipv4.conf.all.src_valid_mark: 1
+    volumes:
+      - warp-data:/etc/wireguard
     ports:
       - "127.0.0.1:${WARP_SOCKS_PORT:-40000}:1080"
     healthcheck:
@@ -104,3 +101,6 @@ services:
       - ./config.yaml:/app/config.yaml
     environment:
       CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY}
+
+volumes:
+  warp-data:

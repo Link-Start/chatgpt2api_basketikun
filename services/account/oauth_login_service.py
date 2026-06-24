@@ -19,7 +19,7 @@ import uuid
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from utils.http_client import HttpClient
+import httpx
 
 from services.proxy_service import proxy_settings
 from services.register.openai_register import (
@@ -193,8 +193,8 @@ class OAuthLoginService:
     @staticmethod
     def _exchange_code(code: str, code_verifier: str, redirect_uri: str) -> dict[str, str]:
         """调用 /api/accounts/oauth/token 用 code+verifier 换 token 三件套。"""
-        kwargs = proxy_settings.build_client_kwargs(fingerprint="chrome", verify=False)
-        session = HttpClient(**kwargs)
+        kwargs = proxy_settings.build_client_kwargs(verify=False)
+        session = httpx.Client(**kwargs)
         try:
             response = session.post(
                 f"{auth_base}/api/accounts/oauth/token",

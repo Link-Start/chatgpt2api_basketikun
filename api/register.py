@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.support import require_admin
-from services.register_service import register_service
+from services.register.register_service import register_service
 
 
 class RegisterConfigRequest(BaseModel):

@@ -34,10 +34,6 @@ class AccountService:
         "Chrome/145.0.0.0 Safari/537.36"
     )
 
-    # 刷新进度追踪
-    _refresh_progress: dict[str, dict] = {}
-    _refresh_progress_lock = Lock()
-
     def __init__(self, accounts_file: Path | None = None):
         self.accounts_file = accounts_file or DATA_DIR / "accounts.json"
         self.accounts_file.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +44,7 @@ class AccountService:
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
+        self._refreshing_tokens: set[str] = set()
         self._cumulative_total = self._load_cumulative_total()
 
     def _get_cumulative_file(self) -> Path:
@@ -242,6 +239,7 @@ class AccountService:
         normalized["last_invalid_at"] = normalized.get("last_invalid_at") or None
         normalized["last_refresh_error"] = normalized.get("last_refresh_error") or None
         normalized["last_refresh_error_at"] = normalized.get("last_refresh_error_at") or None
+        normalized["last_refreshed_at"] = normalized.get("last_refreshed_at") or None
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
@@ -359,10 +357,11 @@ class AccountService:
         return due_at if due_at <= now else None
 
     def _request_access_token_refresh(self, refresh_token: str, account: dict | None = None) -> dict[str, str]:
-        from utils.http_client import HttpClient
+        import httpx
         from services.proxy_service import proxy_settings
 
-        session = HttpClient(**proxy_settings.build_client_kwargs(account=account, fingerprint="chrome110", verify=True))
+        kwargs = proxy_settings.build_client_kwargs(account=account, verify=True)
+        session = httpx.Client(**kwargs)
         try:
             response = session.post(
                 self._OAUTH_TOKEN_URL,
@@ -661,7 +660,8 @@ class AccountService:
         if not config.auto_remove_invalid_accounts:
             self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=quiet)
             return False
-        removed = bool(self.delete_accounts([access_token])["removed"])
+        removed = self.get_account(access_token) is not None
+        self.delete_accounts([access_token])
         if removed:
             log_service.add(LOG_TYPE_ACCOUNT, "自动移除异常账号",
                             {"source": event, "token": anonymize_token(access_token)})
@@ -733,7 +733,7 @@ class AccountService:
             payload["source_type"] = "codex"
         if payload.get("plan_type") and not payload.get("type"):
             payload["type"] = str(payload.get("plan_type") or "").strip()
-        token_payload = self._decode_jwt_payload(access_token)
+        token_payload = AccountService._decode_jwt_payload(access_token)
         profile_claim = token_payload.get("https://api.openai.com/profile")
         profile_claim = profile_claim if isinstance(profile_claim, dict) else {}
         auth_claim = token_payload.get("https://api.openai.com/auth")
@@ -743,7 +743,7 @@ class AccountService:
         if not payload.get("user_id"):
             payload["user_id"] = str(auth_claim.get("user_id") or "").strip() or None
         if not payload.get("type"):
-            payload["type"] = self._normalize_account_type(auth_claim.get("chatgpt_plan_type")) or "free"
+            payload["type"] = AccountService._normalize_account_type(auth_claim.get("chatgpt_plan_type")) or "free"
         return payload
 
     def add_account_items(self, items: list[dict]) -> dict:
@@ -808,29 +808,26 @@ class AccountService:
                             {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items}
 
-    def delete_accounts(self, tokens: list[str]) -> dict:
+    def delete_accounts(self, tokens: list[str]) -> None:
         target_set = set(token for token in tokens if token)
         if not target_set:
-            return {"removed": 0, "items": self.list_accounts()}
+            return
         with self._lock:
             target_set = {self._resolve_access_token_locked(token) for token in target_set if token}
-            removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
             for token in target_set:
+                self._accounts.pop(token, None)
                 self._image_inflight.pop(token, None)
             self._token_aliases = {
                 old: new
                 for old, new in self._token_aliases.items()
                 if old not in target_set and new not in target_set
             }
-            if removed:
-                if self._accounts:
-                    self._index %= len(self._accounts)
-                else:
-                    self._index = 0
-                self._save_accounts()
-                log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = [dict(item) for item in self._accounts.values()]
-        return {"removed": removed, "items": items}
+            if self._accounts:
+                self._index %= len(self._accounts)
+            else:
+                self._index = 0
+            self._save_accounts()
+            log_service.add(LOG_TYPE_ACCOUNT, "删除账号", {})
 
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
         if not access_token:
@@ -995,85 +992,76 @@ class AccountService:
         self._record_refresh_success(active_token)
         return self.update_account(active_token, result)
 
-    # ---- 刷新进度追踪 ----
+    def _claim_refresh_tokens(self, access_tokens: list[str]) -> tuple[list[str], int]:
+        now = datetime.now(timezone.utc)
+        interval_seconds = config.refresh_account_interval_seconds
+        claimed: list[str] = []
+        skipped = 0
+        with self._lock:
+            for token in access_tokens:
+                resolved = self._resolve_access_token_locked(token)
+                account = self._accounts.get(resolved)
+                if not account:
+                    skipped += 1
+                    continue
+                if resolved in self._refreshing_tokens:
+                    skipped += 1
+                    continue
+                last_refreshed_at = self._parse_time(account.get("last_refreshed_at"))
+                if last_refreshed_at and (now - last_refreshed_at).total_seconds() < interval_seconds:
+                    skipped += 1
+                    continue
+                self._refreshing_tokens.add(resolved)
+                claimed.append(resolved)
+        return claimed, skipped
 
-    def init_refresh_progress(self, progress_id: str, total: int) -> None:
-        """初始化刷新进度记录。"""
-        with self._refresh_progress_lock:
-            self._refresh_progress[progress_id] = {
-                "total": total,
-                "processed": 0,
-                "done": False,
-                "error": None,
-                "status_counts": {"正常": 0, "限流": 0, "异常": 0, "禁用": 0},
-                "total_quota": 0,
-            }
-
-    def update_refresh_progress(self, progress_id: str, token: str) -> None:
-        """刷新单个账号后，更新进度计数。"""
-        account = self.get_account(token)
-        status = str(account.get("status") or "正常").strip() if account else "正常"
-        quota = max(0, int(account.get("quota") or 0)) if account else 0
-
-        with self._refresh_progress_lock:
-            progress = self._refresh_progress.get(progress_id)
-            if progress is None:
+    def _release_refresh_token(self, access_token: str, refreshed: bool) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            resolved = self._resolve_access_token_locked(access_token)
+            self._refreshing_tokens.discard(access_token)
+            self._refreshing_tokens.discard(resolved)
+            current = self._accounts.get(resolved)
+            if current is None or not refreshed:
                 return
-            progress["processed"] += 1
-            progress["status_counts"][status] = progress["status_counts"].get(status, 0) + 1
-            progress["total_quota"] += quota
-
-    def finish_refresh_progress(self, progress_id: str, result: dict | None = None, error: str | None = None) -> None:
-        """标记刷新完成。"""
-        with self._refresh_progress_lock:
-            progress = self._refresh_progress.get(progress_id)
-            if progress is None:
-                return
-            progress["done"] = True
-            progress["result"] = result
-            if error:
-                progress["error"] = error
-
-    def get_refresh_progress(self, progress_id: str) -> dict | None:
-        """查询刷新进度。"""
-        with self._refresh_progress_lock:
-            progress = self._refresh_progress.get(progress_id)
-            return dict(progress) if progress else None
-
-    def clean_refresh_progress(self, progress_id: str) -> None:
-        """清理过期进度记录。"""
-        with self._refresh_progress_lock:
-            self._refresh_progress.pop(progress_id, None)
+            next_item = dict(current)
+            next_item["last_refreshed_at"] = now
+            account = self._normalize_account(next_item)
+            if account is not None:
+                self._accounts[resolved] = account
+                self._save_accounts()
 
     def refresh_accounts(
         self,
         access_tokens: list[str],
-        progress_id: str | None = None,
         defer_invalid_removal: bool = True,
     ) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
             items = self.list_accounts()
-            result = {"refreshed": 0, "errors": [], "items": items}
-            if progress_id:
-                self.finish_refresh_progress(progress_id, result)
-            return result
+            return {"refreshed": 0, "skipped": 0, "errors": [], "items": items}
 
         refreshed = 0
         errors = []
-        max_workers = min(10, len(access_tokens))
-
-        if progress_id:
-            self.init_refresh_progress(progress_id, len(access_tokens))
+        refresh_tokens, skipped = self._claim_refresh_tokens(access_tokens)
+        if not refresh_tokens:
+            return {
+                "refreshed": 0,
+                "skipped": skipped,
+                "errors": [],
+                "items": self.list_accounts(),
+            }
+        max_workers = min(10, len(refresh_tokens))
 
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
             futures = {
                 executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal): token
-                for token in access_tokens
+                for token in refresh_tokens
             }
             for future in as_completed(futures):
                 token = futures[future]
+                account = None
                 try:
                     account = future.result()
                 except (KeyboardInterrupt, SystemExit):
@@ -1088,12 +1076,11 @@ class AccountService:
                 else:
                     if account is not None:
                         refreshed += 1
-
-                if progress_id:
-                    self.update_refresh_progress(progress_id, token)
+                finally:
+                    self._release_refresh_token(token, account is not None)
         except (KeyboardInterrupt, SystemExit):
-            if progress_id:
-                self.finish_refresh_progress(progress_id, error="cancelled")
+            for token in refresh_tokens:
+                self._release_refresh_token(token, False)
             executor.shutdown(wait=False, cancel_futures=True)
             raise
         else:
@@ -1101,12 +1088,10 @@ class AccountService:
 
         result = {
             "refreshed": refreshed,
+            "skipped": skipped,
             "errors": errors,
             "items": self.list_accounts(),
         }
-
-        if progress_id:
-            self.finish_refresh_progress(progress_id, result)
 
         return result
 

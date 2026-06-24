@@ -258,7 +258,7 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/health")
     async def health_dashboard():
-        from services.account_service import account_service as acct_svc
+        from services.account.account_service import account_service as acct_svc
         stats = acct_svc.get_stats()
         storage_health = _json_storage_health()
         healthy = stats["active"] > 0 or stats["unlimited_quota_count"] > 0

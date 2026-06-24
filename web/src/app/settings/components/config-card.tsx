@@ -49,7 +49,7 @@ export function ConfigCard() {
   const logLevelOptions = ["debug", "info", "warning", "error"];
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
-  const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
+  const setRefreshAccountIntervalSeconds = useSettingsStore((state) => state.setRefreshAccountIntervalSeconds);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
@@ -92,12 +92,12 @@ export function ConfigCard() {
           <div className="space-y-2">
             <label className="text-sm text-stone-700">账号刷新间隔</label>
             <Input
-              value={String(config?.refresh_account_interval_minute || "")}
-              onChange={(event) => setRefreshAccountIntervalMinute(event.target.value)}
-              placeholder="分钟"
+              value={String(config?.refresh_account_interval_seconds || "")}
+              onChange={(event) => setRefreshAccountIntervalSeconds(event.target.value)}
+              placeholder="秒"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">单位分钟，控制账号自动刷新频率。</p>
+            <p className="text-xs text-stone-500">单位秒，账号刷新完成后等待多久才允许再次刷新。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">全局代理</label>

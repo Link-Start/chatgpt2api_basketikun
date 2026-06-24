@@ -406,11 +406,8 @@ class ConfigStore:
         return DATA_DIR / "accounts.json"
 
     @property
-    def refresh_account_interval_minute(self) -> int:
-        try:
-            return int(self.data.get("refresh_account_interval_minute", 5))
-        except (TypeError, ValueError):
-            return 5
+    def refresh_account_interval_seconds(self) -> int:
+        return max(1, int(self.data.get("refresh_account_interval_seconds", 300)))
 
     @property
     def image_retention_days(self) -> int:
@@ -546,7 +543,7 @@ class ConfigStore:
 
     def get(self) -> dict[str, object]:
         data = dict(self.data)
-        data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
+        data["refresh_account_interval_seconds"] = self.refresh_account_interval_seconds
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs

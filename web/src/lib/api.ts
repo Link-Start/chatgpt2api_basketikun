@@ -38,6 +38,7 @@ export type Account = {
   /** 当前图片并发数(正在生成、尚未结束的图片数)。号池空闲时持续 > 0 表示并发槽位泄漏。 */
   image_inflight?: number;
   last_used_at?: string | null;
+  last_refreshed_at?: string | null;
   proxy?: string | null;
 };
 
@@ -81,18 +82,8 @@ type AccountMutationResponse = {
 export type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  skipped?: number;
   errors: Array<{ access_token: string; error: string }>;
-};
-
-export type RefreshProgressResponse = {
-  total: number;
-  processed: number;
-  done: boolean;
-  error: string | null;
-  status_counts?: Record<string, number>;
-  total_quota?: number;
-  result?: AccountRefreshResponse | null;
-  results?: Array<{ token: string; status: string; error?: string | null }>;
 };
 
 type AccountUpdateResponse = {
@@ -185,7 +176,7 @@ export type SettingsConfig = {
     model?: string;
     prompt?: string;
   };
-  refresh_account_interval_minute?: number | string;
+  refresh_account_interval_seconds?: number | string;
   image_retention_days?: number | string;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
@@ -365,21 +356,17 @@ export async function finishOAuthLogin(sessionId: string, callback: string) {
 }
 
 export async function deleteAccounts(tokens: string[]) {
-  return httpRequest<AccountMutationResponse>("/api/accounts", {
+  return httpRequest<{ ok: boolean }>("/api/accounts", {
     method: "DELETE",
     body: { tokens },
   });
 }
 
 export async function refreshAccounts(accessTokens: string[]) {
-  return httpRequest<{ progress_id: string }>("/api/accounts/refresh", {
+  return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
     body: { access_tokens: accessTokens },
   });
-}
-
-export async function fetchRefreshProgress(progressId: string) {
-  return httpRequest<RefreshProgressResponse>(`/api/accounts/refresh/progress/${progressId}`);
 }
 
 export async function updateAccount(

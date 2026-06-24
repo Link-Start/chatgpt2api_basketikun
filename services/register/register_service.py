@@ -8,7 +8,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.account_service import account_service
+from services.account.account_service import account_service
 from services.config import DATA_DIR
 from services.register import mail_provider, openai_register
 
