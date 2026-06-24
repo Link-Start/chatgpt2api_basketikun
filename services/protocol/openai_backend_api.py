@@ -5,10 +5,11 @@ import os
 import random
 import re
 import time
+from contextlib import contextmanager
 
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 from collections.abc import Callable
@@ -127,6 +128,7 @@ class EditableFileExportResult:
     conversation_id: str
     primary_path: Path
     zip_path: Path
+    step_timings: list[dict[str, Any]] = field(default_factory=list)
 
 
 class OpenAIBackendAPI:
@@ -172,6 +174,7 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
+        self.step_timings: list[dict[str, Any]] = []
         self.session = curl_requests.Session(**proxy_settings.build_client_kwargs(
             account=self.account,
             impersonate=self.fp["impersonate"],
@@ -205,6 +208,31 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    @contextmanager
+    def _timed_step(self, name: str, **extra: Any):
+        started = time.time()
+        status = "success"
+        error = ""
+        try:
+            yield
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)[:300]
+            raise
+        finally:
+            item: dict[str, Any] = {
+                "name": name,
+                "duration_ms": int((time.time() - started) * 1000),
+                "status": status,
+            }
+            if error:
+                item["error"] = error
+            item.update({key: value for key, value in extra.items() if value not in ("", None)})
+            self.step_timings.append(item)
+
+    def get_step_timings(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self.step_timings]
 
     def _build_fp(self) -> Dict[str, str]:
         account = self.account
@@ -875,32 +903,42 @@ class OpenAIBackendAPI:
         self.session.headers["OAI-Client-Build-Number"] = EDITABLE_FILE_CLIENT_BUILD_NUMBER
         output_path = Path(output_dir).expanduser().resolve()
         output_path.mkdir(parents=True, exist_ok=True)
-        uploaded = [self._upload_editable_base64_image(item, index) for index, item in enumerate(base64_images, start=1)]
-        conduit_token = self._prepare_editable_conversation(prompt, [item["mime_type"] for item in uploaded])
-        conversation_id = self._run_editable_conversation(prompt, uploaded, conduit_token)
-        artifacts = self._wait_editable_output_artifacts(
-            conversation_id,
-            primary_label,
-            primary_suffixes,
-            primary_mime_types,
-            primary_mime_keywords,
-            export_file_re,
-            timeout_secs,
-            poll_interval_secs,
-        )
-        downloaded = [self._download_editable_artifact(
-            conversation_id,
-            item,
-            output_path,
-            primary_mime_types,
-            primary_mime_keywords,
-            primary_default_extension,
-        ) for item in artifacts]
+        with self._timed_step("editable_upload_images", count=len(base64_images)):
+            uploaded = [self._upload_editable_base64_image(item, index) for index, item in enumerate(base64_images, start=1)]
+        with self._timed_step("editable_prepare_conversation"):
+            conduit_token = self._prepare_editable_conversation(prompt, [item["mime_type"] for item in uploaded])
+        with self._timed_step("editable_run_conversation"):
+            conversation_id = self._run_editable_conversation(prompt, uploaded, conduit_token)
+        with self._timed_step("editable_wait_artifacts", primary_label=primary_label):
+            artifacts = self._wait_editable_output_artifacts(
+                conversation_id,
+                primary_label,
+                primary_suffixes,
+                primary_mime_types,
+                primary_mime_keywords,
+                export_file_re,
+                timeout_secs,
+                poll_interval_secs,
+            )
+        with self._timed_step("editable_download_artifacts", count=len(artifacts)):
+            downloaded = [self._download_editable_artifact(
+                conversation_id,
+                item,
+                output_path,
+                primary_mime_types,
+                primary_mime_keywords,
+                primary_default_extension,
+            ) for item in artifacts]
         primary_path = next((item for item in downloaded if item.suffix.lower() in primary_suffixes), None)
         zip_path = next((item for item in downloaded if item.suffix.lower() == ".zip"), None)
         if not primary_path or not zip_path:
             raise RuntimeError(f"download finished but did not get both {primary_label} and zip files: {downloaded}")
-        return EditableFileExportResult(conversation_id=conversation_id, primary_path=primary_path, zip_path=zip_path)
+        return EditableFileExportResult(
+            conversation_id=conversation_id,
+            primary_path=primary_path,
+            zip_path=zip_path,
+            step_timings=self.get_step_timings(),
+        )
 
     def _upload_editable_base64_image(self, base64_image: str, index: int) -> Dict[str, Any]:
         data, file_name, mime_type, width, height = self._decode_editable_base64_image(base64_image, index)
@@ -2143,7 +2181,8 @@ class OpenAIBackendAPI:
                     "file_ids": file_ids,
                     "sediment_ids": sediment_ids,
                 })
-                return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+                with self._timed_step("image_resolve_urls", file_ids=len(file_ids), sediment_ids=len(sediment_ids)):
+                    return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
         if poll and conversation_id:
             logger.info({
                 "event": "image_resolve_poll_needed",
@@ -2153,12 +2192,13 @@ class OpenAIBackendAPI:
                 "poll_timeout_secs": timeout,
             })
             try:
-                polled_file_ids, polled_sediment_ids = self._poll_image_results(
-                    conversation_id,
-                    timeout,
-                    file_ids,
-                    sediment_ids,
-                )
+                with self._timed_step("image_poll_results", timeout_secs=timeout):
+                    polled_file_ids, polled_sediment_ids = self._poll_image_results(
+                        conversation_id,
+                        timeout,
+                        file_ids,
+                        sediment_ids,
+                    )
             except ImagePollTimeoutError as exc:
                 # 如果轮询超时且有 task error（如 moderation 拦截），抛出 ImageContentPolicyError
                 # 而非 ImagePollTimeoutError，让调用方能区分真正的超时和上游拒绝
@@ -2186,16 +2226,18 @@ class OpenAIBackendAPI:
             else:
                 file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
-        return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        with self._timed_step("image_resolve_urls", file_ids=len(file_ids), sediment_ids=len(sediment_ids)):
+            return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
-        images = []
-        for url in urls:
-            response = self.session.get(url, timeout=120)
-            ensure_ok(response, "image_download")
-            if response.content not in images:
-                images.append(response.content)
-        return images
+        with self._timed_step("image_download_bytes", count=len(urls)):
+            images = []
+            for url in urls:
+                response = self.session.get(url, timeout=120)
+                ensure_ok(response, "image_download")
+                if response.content not in images:
+                    images.append(response.content)
+            return images
 
     def stream_conversation(
             self,
@@ -2245,18 +2287,24 @@ class OpenAIBackendAPI:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
         self._report_progress("uploading")
-        references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
+        with self._timed_step("image_upload_inputs", count=len(images)):
+            references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
-        self._bootstrap()
+        with self._timed_step("image_bootstrap"):
+            self._bootstrap()
         self._report_progress("getting_token")
-        requirements = self._get_chat_requirements()
+        with self._timed_step("image_get_chat_requirements"):
+            requirements = self._get_chat_requirements()
         self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+        with self._timed_step("image_prepare_conversation"):
+            conduit_token = self._prepare_image_conversation(prompt, requirements, model)
         self._report_progress("starting_generation")
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        with self._timed_step("image_start_generation"):
+            response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         self._report_progress("generating")
         try:
-            yield from iter_sse_payloads(response)
+            with self._timed_step("image_read_sse"):
+                yield from iter_sse_payloads(response)
         finally:
             response.close()
 

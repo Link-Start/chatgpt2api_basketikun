@@ -80,6 +80,14 @@ def create_router() -> APIRouter:
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
+    @router.get("/api/image-models")
+    async def list_image_models(authorization: str | None = Header(default=None)):
+        require_identity(authorization)
+        try:
+            return await run_in_threadpool(openai_v1_models.list_image_models)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+
     @router.post("/v1/images/generations")
     async def generate_images(
             body: ImageGenerationRequest,

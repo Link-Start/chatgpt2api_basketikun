@@ -360,6 +360,10 @@ export async function fetchModels() {
   return httpRequest<ModelListResponse>("/v1/models");
 }
 
+export async function fetchImageModels() {
+  return httpRequest<ModelListResponse>("/api/image-models");
+}
+
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",

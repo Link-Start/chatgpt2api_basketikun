@@ -36,6 +36,7 @@ class ImageGenerationError(Exception):
         param: str | None = None,
         account_email: str = "",
         conversation_id: str = "",
+        step_timings: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -44,6 +45,7 @@ class ImageGenerationError(Exception):
         self.param = param
         self.account_email = account_email
         self.conversation_id = conversation_id
+        self.step_timings = step_timings or []
 
     def to_openai_error(self) -> dict[str, Any]:
         error_dict = {
@@ -332,6 +334,7 @@ class ImageOutput:
     data: list[dict[str, Any]] = field(default_factory=list)
     account_email: str = ""
     conversation_id: str = ""
+    step_timings: list[dict[str, Any]] = field(default_factory=list)
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -348,6 +351,8 @@ class ImageOutput:
             chunk["_account_email"] = self.account_email
         if self.conversation_id:
             chunk["_conversation_id"] = self.conversation_id
+        if self.step_timings:
+            chunk["_step_timings"] = self.step_timings
         if self.kind == "message":
             chunk.update({
                 "object": "image.generation.message",
@@ -771,6 +776,10 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+
+    def timings() -> list[dict[str, Any]]:
+        return backend.get_step_timings()
+
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -819,11 +828,11 @@ def stream_image_outputs(
         # 尝试从 /backend-api/tasks/ 获取详细错误信息
         detailed_error = _get_detailed_error_from_tasks(backend, conversation_id)
         error_text = detailed_error or message or "Image generation was rejected by upstream policy."
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=error_text, conversation_id=conversation_id)
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=error_text, conversation_id=conversation_id, step_timings=timings())
         return
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id, step_timings=timings())
         return
 
     # 检测模型是否返回了文本描述（含 referenced_image_ids）而非实际生成图片
@@ -874,7 +883,7 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "error": detailed_error,
             })
-            yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=detailed_error, conversation_id=conversation_id)
+            yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=detailed_error, conversation_id=conversation_id, step_timings=timings())
             return
         if detailed_error and (should_poll_for_image or is_text_reply):
             logger.info({
@@ -940,7 +949,7 @@ def stream_image_outputs(
             int(time.time()),
         )["data"]
         if data:
-            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
+            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id, step_timings=timings())
         return
 
     if message:
@@ -978,12 +987,13 @@ def stream_image_outputs(
             MAX_POLL_RETRIES = 3
             for poll_attempt in range(1, MAX_POLL_RETRIES + 1):
                 try:
-                    polled_file_ids, polled_sediment_ids = backend._poll_image_results(
-                        conversation_id,
-                        retry_poll_timeout,
-                        file_ids,
-                        sediment_ids,
-                    )
+                    with backend._timed_step("image_text_reply_retry_poll", attempt=poll_attempt, timeout_secs=retry_poll_timeout):
+                        polled_file_ids, polled_sediment_ids = backend._poll_image_results(
+                            conversation_id,
+                            retry_poll_timeout,
+                            file_ids,
+                            sediment_ids,
+                        )
                     file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                     sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
                     break  # 轮询成功，退出重试循环
@@ -1037,7 +1047,7 @@ def stream_image_outputs(
                         int(time.time()),
                     )["data"]
                     if data:
-                        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
+                        yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id, step_timings=timings())
                         return
         elif is_text_reply:
             logger.warning({
@@ -1045,7 +1055,7 @@ def stream_image_outputs(
                 "conversation_id": conversation_id,
                 "message_preview": message[:200],
             })
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id, step_timings=timings())
         return
 
     # 兜底：当 message 为空且图片 URL 解析失败时，先尝试一次短延迟重试轮询
@@ -1090,12 +1100,13 @@ def stream_image_outputs(
             })
             time.sleep(retry_wait_secs)
             try:
-                polled_file_ids, polled_sediment_ids = backend._poll_image_results(
-                    conversation_id,
-                    retry_poll_timeout,
-                    file_ids,
-                    sediment_ids,
-                )
+                with backend._timed_step("image_fallback_retry_poll", attempt=poll_attempt, timeout_secs=retry_poll_timeout):
+                    polled_file_ids, polled_sediment_ids = backend._poll_image_results(
+                        conversation_id,
+                        retry_poll_timeout,
+                        file_ids,
+                        sediment_ids,
+                    )
                 file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
                 break  # 轮询成功，退出重试循环
@@ -1149,16 +1160,17 @@ def stream_image_outputs(
                     int(time.time()),
                 )["data"]
                 if data:
-                    yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
+                    yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id, step_timings=timings())
                     return
         
         # 重试后仍然失败，yield 错误消息
         yield ImageOutput(kind="message", model=request.model, index=index, total=total,
                           text="Image generation completed upstream but the result could not be retrieved. "
                                "The image may still be processing. Please try again in a moment.",
-                          conversation_id=conversation_id)
+                          conversation_id=conversation_id,
+                          step_timings=timings())
     elif message:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id, step_timings=timings())
     else:
         # conversation_id 也为空时（SSE 流极短、未捕获到会话 ID），
         # 仍然 yield 一条消息，避免 stream_image_outputs_with_pool 产生
@@ -1166,7 +1178,8 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total,
                           text="Image generation started upstream but the response was incomplete. "
                                "Please try again.",
-                          conversation_id=conversation_id)
+                          conversation_id=conversation_id,
+                          step_timings=timings())
 
 
 def stream_codex_image_outputs(
@@ -1248,6 +1261,7 @@ def _generate_single_image(
     account_email = ""
 
     while True:
+        step_timings: list[dict[str, Any]] = []
         channel = config.get_codex_channel_for_model(request.model)
         channel_type = str((channel or {}).get("type") or "")
         if channel and channel_type != CODEX_SYSTEM_TYPE:
@@ -1260,6 +1274,7 @@ def _generate_single_image(
                 if str(model or "").strip()
             }
             raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(channel_models)))
+        account_started = time.time()
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1271,7 +1286,22 @@ def _generate_single_image(
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
             )
         except RuntimeError as exc:
-            raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
+            step_timings.append({
+                "name": "image_get_account",
+                "duration_ms": int((time.time() - account_started) * 1000),
+                "status": "failed",
+                "error": str(exc)[:300],
+            })
+            raise ImageGenerationError(
+                str(exc) or "image generation failed",
+                account_email=account_email,
+                step_timings=step_timings,
+            ) from exc
+        step_timings.append({
+            "name": "image_get_account",
+            "duration_ms": int((time.time() - account_started) * 1000),
+            "status": "success",
+        })
 
         emitted_for_token = False
         returned_message = False
@@ -1285,12 +1315,14 @@ def _generate_single_image(
             "account_found": bool(account),
             "index": index,
         })
+        backend: OpenAIBackendAPI | None = None
         try:
             outputs: list[ImageOutput] = []
             if is_codex_image_model(request.model):
                 output_iter = stream_codex_image_outputs(token, request, index, total)
             else:
                 backend = OpenAIBackendAPI(account=account or {"access_token": token})
+                backend.step_timings.extend(step_timings)
                 if request.progress_callback:
                     backend.progress_callback = request.progress_callback
                 output_iter = stream_image_outputs(backend, request, index, total)
@@ -1305,6 +1337,7 @@ def _generate_single_image(
                         code="content_policy_violation",
                         account_email=account_email,
                         conversation_id=output.conversation_id,
+                        step_timings=output.step_timings,
                     )
                 emitted_for_token = True
                 returned_message = output.kind == "message"
@@ -1324,6 +1357,7 @@ def _generate_single_image(
                         code="no_image_generated",
                         account_email=account_email,
                         conversation_id=conv_id,
+                        step_timings=(outputs[-1].step_timings if outputs else []),
                     )
                 return outputs
             account_service.mark_image_result(token, True)
@@ -1332,6 +1366,8 @@ def _generate_single_image(
             account_service.mark_image_result(token, False)
             if account_email:
                 setattr(exc, "account_email", account_email)
+            if backend:
+                setattr(exc, "step_timings", backend.get_step_timings())
             # 轮询超时：换账号重试
             if not emitted_for_token:
                 poll_timeout_retry_count += 1
@@ -1356,6 +1392,8 @@ def _generate_single_image(
             raise
         except ImageContentPolicyError as exc:
             account_service.mark_image_result(token, False)
+            if backend:
+                setattr(exc, "step_timings", backend.get_step_timings())
             logger.warning({
                 "event": "image_stream_content_policy_error",
                 "request_token": token,
@@ -1370,11 +1408,14 @@ def _generate_single_image(
                 code="content_policy_violation",
                 account_email=account_email,
                 conversation_id=getattr(exc, "conversation_id", ""),
+                step_timings=getattr(exc, "step_timings", []),
             ) from exc
         except ImageGenerationError as exc:
             account_service.mark_image_result(token, False)
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
+            if backend and not getattr(exc, "step_timings", None):
+                exc.step_timings = backend.get_step_timings()
             error_text = str(exc)
             # 如果是模型返回文本而非图片，尝试换账号重试
             if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
@@ -1404,6 +1445,7 @@ def _generate_single_image(
                     code="upstream_text_reply",
                     account_email=account_email,
                     conversation_id=getattr(exc, "conversation_id", ""),
+                    step_timings=getattr(exc, "step_timings", []),
                 ) from exc
             logger.warning({
                 "event": "image_stream_generation_error",
@@ -1415,6 +1457,8 @@ def _generate_single_image(
             raise
         except Exception as exc:
             account_service.mark_image_result(token, False)
+            if backend:
+                setattr(exc, "step_timings", backend.get_step_timings())
             last_error = str(exc)
             logger.warning({
                 "event": "image_stream_fail",
@@ -1460,7 +1504,12 @@ def _generate_single_image(
                     })
                     time.sleep(wait_secs)
                     continue
-            raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
+            raise ImageGenerationError(
+                image_stream_error_message(last_error),
+                account_email=account_email,
+                conversation_id="",
+                step_timings=getattr(exc, "step_timings", []),
+            ) from exc
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
@@ -1566,10 +1615,14 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     message = ""
     progress_parts: list[str] = []
     account_email = ""
+    step_timings: list[dict[str, Any]] = []
     for output in outputs:
         created = created or output.created
         if output.account_email and not account_email:
             account_email = output.account_email
+        for item in output.step_timings:
+            if item not in step_timings:
+                step_timings.append(item)
         if output.kind == "progress" and output.text:
             progress_parts.append(output.text)
         elif output.kind == "message":
@@ -1584,5 +1637,7 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
             result["message"] = text
     if account_email:
         result["_account_email"] = account_email
+    if step_timings:
+        result["_step_timings"] = step_timings
     return result
 

@@ -42,6 +42,53 @@ function getUrls(item: SystemLog | null) {
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
 }
 
+type StepTiming = {
+  name: string;
+  duration_ms: number;
+  status?: string;
+  error?: string;
+  [key: string]: unknown;
+};
+
+const stepLabels: Record<string, string> = {
+  image_get_account: "获取账号",
+  image_upload_inputs: "上传输入图",
+  image_bootstrap: "预热页面",
+  image_get_chat_requirements: "获取请求令牌",
+  image_prepare_conversation: "准备会话",
+  image_start_generation: "启动生成",
+  image_read_sse: "读取 SSE",
+  image_poll_results: "轮询结果",
+  image_text_reply_retry_poll: "文本回复重试轮询",
+  image_fallback_retry_poll: "兜底重试轮询",
+  image_resolve_urls: "解析下载地址",
+  image_download_bytes: "下载图片",
+  editable_upload_images: "上传参考图",
+  editable_prepare_conversation: "准备编辑会话",
+  editable_run_conversation: "执行编辑会话",
+  editable_wait_artifacts: "等待文件产物",
+  editable_download_artifacts: "下载文件产物",
+};
+
+function getStepTimings(item: SystemLog | null): StepTiming[] {
+  const value = item?.detail?.step_timings;
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    .map((entry) => ({
+      ...entry,
+      name: String(entry.name || "unknown"),
+      duration_ms: Number(entry.duration_ms) || 0,
+      status: typeof entry.status === "string" ? entry.status : undefined,
+      error: typeof entry.error === "string" ? entry.error : undefined,
+    }));
+}
+
+function formatStepDuration(ms: number) {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
+  return `${Math.max(0, Math.round(ms))} ms`;
+}
+
 function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
@@ -64,6 +111,8 @@ function LogsContent() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const detailUrls = getUrls(detailLog);
+  const detailStepTimings = getStepTimings(detailLog);
+  const maxStepDuration = Math.max(...detailStepTimings.map((item) => item.duration_ms), 1);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const pageSize = 10;
@@ -285,7 +334,7 @@ function LogsContent() {
             <div className="space-y-4">
               <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
                 {Object.entries(detailLog?.detail || {})
-                  .filter(([key, value]) => key !== "urls" && typeof value !== "object")
+                  .filter(([key, value]) => !["urls", "step_timings"].includes(key) && typeof value !== "object")
                   .map(([key, value]) => (
                     <div key={key} className="flex items-start justify-between gap-4">
                       <span className="text-stone-400">{key}</span>
@@ -293,6 +342,53 @@ function LogsContent() {
                     </div>
                   ))}
               </div>
+              {detailStepTimings.length ? (
+                <div className="rounded-xl border border-stone-200 bg-white p-4">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-stone-900">步骤耗时</div>
+                      <div className="text-xs text-stone-500">按执行顺序展示，条形长度表示相对耗时</div>
+                    </div>
+                    <Badge variant="secondary" className="rounded-md">
+                      {detailStepTimings.length} 步
+                    </Badge>
+                  </div>
+                  <div className="space-y-3">
+                    {detailStepTimings.map((step, index) => {
+                      const percent = Math.max(3, Math.round((step.duration_ms / maxStepDuration) * 100));
+                      const failed = step.status === "failed";
+                      const meta = Object.entries(step)
+                        .filter(([key, value]) => !["name", "duration_ms", "status", "error"].includes(key) && value !== undefined && value !== "")
+                        .map(([key, value]) => `${key}: ${String(value)}`);
+                      return (
+                        <div key={`${step.name}-${index}`} className="space-y-1.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className="font-medium text-stone-800">{stepLabels[step.name] || step.name}</span>
+                              <Badge variant={failed ? "danger" : "success"} className="rounded-md">
+                                {failed ? "失败" : "成功"}
+                              </Badge>
+                            </div>
+                            <span className="font-mono text-xs text-stone-500">{formatStepDuration(step.duration_ms)}</span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-stone-100">
+                            <div
+                              className={failed ? "h-full rounded-full bg-rose-500" : "h-full rounded-full bg-emerald-500"}
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                          {meta.length || step.error ? (
+                            <div className="text-xs leading-5 text-stone-500">
+                              {meta.join(" · ")}
+                              {step.error ? <span className="text-rose-600">{meta.length ? " · " : ""}{step.error}</span> : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
               {detailUrls.length ? (
                 <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
                   {detailUrls.map((url, index) => (

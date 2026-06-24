@@ -9,6 +9,7 @@ from pathlib import Path
 from threading import Condition, Lock
 from typing import Any
 
+from services.constants import codex_client_id
 from services.config import DATA_DIR, config
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
@@ -16,6 +17,7 @@ from services.log_service import (
 )
 from utils.date_utils import parse_time, utc_now_text
 from utils.helper import anonymize_token
+from utils.jwt_utils import decode_jwt_payload
 
 
 class AccountService:
@@ -51,15 +53,7 @@ class AccountService:
     @staticmethod
     def _decode_jwt_payload(token: str) -> dict:
         """解码 JWT payload，失败时返回空字典。"""
-        try:
-            payload = str(token or "").split(".")[1]
-            payload += "=" * ((4 - len(payload) % 4) % 4)
-            import base64
-            import json
-            data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+        return decode_jwt_payload(token)
 
     def _load_accounts(self) -> dict[str, dict]:
         """从账号文件加载并按 access_token 建索引。"""
@@ -111,7 +105,7 @@ class AccountService:
         """判断账号来源是否匹配指定来源。"""
         if not source_type:
             return True
-        return cls._normalize_source_type(account.get("source_type")) == cls._normalize_source_type(source_type)
+        return str(account.get("source_type") or "") == str(source_type or "")
 
     @classmethod
     def _account_matches_any_plan_type(cls, account: dict,
@@ -128,9 +122,10 @@ class AccountService:
         return bool(normalized_account and normalized_account in normalized_plans)
 
     @staticmethod
-    def _normalize_source_type(value: object) -> str:
-        """标准化账号来源字段。"""
-        return str(value or "web").strip().lower() or "web"
+    def _source_type_from_access_token(access_token: str) -> str:
+        payload = decode_jwt_payload(access_token)
+        client_id = str(payload.get("client_id") or "").strip()
+        return "codex" if client_id == codex_client_id else "web"
 
     @staticmethod
     def _normalize_account_type(value: object) -> str | None:
@@ -171,10 +166,7 @@ class AccountService:
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
-        source_type = normalized.get("source_type")
-        if not source_type and str(normalized.get("export_type") or "").strip().lower() == "codex":
-            source_type = "codex"
-        normalized["source_type"] = self._normalize_source_type(source_type)
+        normalized["source_type"] = self._source_type_from_access_token(access_token)
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
@@ -726,10 +718,7 @@ class AccountService:
         # CPA/Codex 导出文件里的 `type=codex` 是导出格式，不是号池套餐类型。
         if str(payload.get("type") or "").strip().lower() == "codex":
             payload["export_type"] = "codex"
-            payload["source_type"] = "codex"
             payload.pop("type", None)
-        if str(payload.get("export_type") or "").strip().lower() == "codex":
-            payload["source_type"] = "codex"
         if payload.get("plan_type") and not payload.get("type"):
             payload["type"] = str(payload.get("plan_type") or "").strip()
         token_payload = AccountService._decode_jwt_payload(access_token)
@@ -754,15 +743,12 @@ class AccountService:
         ]
         return self._add_account_payloads(payloads)
 
-    def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
+    def add_accounts(self, tokens: list[str]) -> dict:
         """按 access_token 列表导入账号。"""
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
-        return self._add_account_payloads([
-            {"access_token": token, "source_type": self._normalize_source_type(source_type)}
-            for token in tokens
-        ])
+        return self._add_account_payloads([{"access_token": token} for token in tokens])
 
     def _add_account_payloads(self, payloads: list[dict]) -> dict:
         """写入去重后的账号 payload 并返回账号列表。"""

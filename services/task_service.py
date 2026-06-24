@@ -435,6 +435,9 @@ class TaskService:
             handler = openai_v1_image_edit.handle if mode == "edit" else openai_v1_image_generations.handle
             result = handler({**payload, "progress_callback": progress})
             data = result.get("data") if isinstance(result, dict) else None
+            step_timings = result.get("_step_timings") if isinstance(result, dict) else []
+            if not isinstance(step_timings, list):
+                step_timings = []
             if not isinstance(data, list) or not data:
                 raise RuntimeError(_clean(result.get("message") if isinstance(result, dict) else "") or "图片生成失败")
             items = [
@@ -457,7 +460,7 @@ class TaskService:
                 ended_ts=time.time(),
                 duration_ms=int((time.time() - started) * 1000),
             )
-            self._log_call(identity, "image", model, started, "图片生成完成", result={"items": items})
+            self._log_call(identity, "image", model, started, "图片生成完成", result={"items": items}, step_timings=step_timings)
         except Exception as exc:
             self._update_task(
                 key,
@@ -466,11 +469,21 @@ class TaskService:
                 ended_ts=time.time(),
                 duration_ms=int((time.time() - started) * 1000),
             )
-            self._log_call(identity, "image", payload.get("model"), started, "图片生成失败", status="failed", error=str(exc))
+            self._log_call(
+                identity,
+                "image",
+                payload.get("model"),
+                started,
+                "图片生成失败",
+                status="failed",
+                error=str(exc),
+                step_timings=getattr(exc, "step_timings", None),
+            )
 
     def _run_file_task(self, key: str, kind: str, prompt: str, base64_images: list[str], identity: dict[str, object], base_url: str) -> None:
         started = time.time()
         self._update_task(key, status=STATUS_RUNNING, error="", started_ts=started)
+        backend: OpenAIBackendAPI | None = None
         try:
             if kind == "psd" and not base64_images:
                 raise ValueError("base64_images is empty")
@@ -494,7 +507,15 @@ class TaskService:
                 ended_ts=time.time(),
                 duration_ms=int((time.time() - started) * 1000),
             )
-            self._log_call(identity, kind, EDITABLE_FILE_MODEL, started, f"{kind.upper()}生成完成", result=item)
+            self._log_call(
+                identity,
+                kind,
+                EDITABLE_FILE_MODEL,
+                started,
+                f"{kind.upper()}生成完成",
+                result=item,
+                step_timings=result.step_timings,
+            )
         except Exception as exc:
             self._update_task(
                 key,
@@ -503,7 +524,16 @@ class TaskService:
                 ended_ts=time.time(),
                 duration_ms=int((time.time() - started) * 1000),
             )
-            self._log_call(identity, kind, EDITABLE_FILE_MODEL, started, f"{kind.upper()}生成失败", status="failed", error=str(exc))
+            self._log_call(
+                identity,
+                kind,
+                EDITABLE_FILE_MODEL,
+                started,
+                f"{kind.upper()}生成失败",
+                status="failed",
+                error=str(exc),
+                step_timings=(backend.get_step_timings() if backend else None),
+            )
 
     def _save_reference_images(self, images: list[tuple[bytes, str, str]], base_url: str) -> list[dict[str, str]]:
         refs = []
@@ -597,6 +627,7 @@ class TaskService:
         status: str = "success",
         error: str = "",
         result: dict[str, Any] | None = None,
+        step_timings: list[dict[str, Any]] | None = None,
     ) -> None:
         detail = {
             "key_id": identity.get("id"),
@@ -613,6 +644,8 @@ class TaskService:
             detail["error"] = error
         if result:
             detail["result"] = result
+        if step_timings:
+            detail["step_timings"] = step_timings
         try:
             log_service.add(LOG_TYPE_CALL, summary, detail)
         except Exception:

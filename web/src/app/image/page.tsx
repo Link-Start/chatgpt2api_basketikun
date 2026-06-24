@@ -25,7 +25,7 @@ import {
   deleteConversationTurnPart,
   fetchAccounts,
   fetchConversations,
-  fetchModels,
+  fetchImageModels,
   fetchImageTasks,
   renameConversation,
   resumeImagePoll,
@@ -33,7 +33,6 @@ import {
   type ConversationTurn,
   type GenerationConversation,
   type ImageModel,
-  type Model,
   type ImageTask,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -216,16 +215,6 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
     bytes[index] = binary.charCodeAt(index);
   }
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
-}
-
-function filterImageModels(items: Model[]): ImageModel[] {
-  const seen = new Set<string>();
-  return items.flatMap((item) => {
-    const id = String(item.id || "").trim();
-    if (!id || seen.has(id) || (!id.toLowerCase().includes("image") && item.owned_by !== "chatgpt2api")) return [];
-    seen.add(id);
-    return [id];
-  });
 }
 
 function normalizeStoredImageModel(value: string | null, availableModels: ImageModel[]): ImageModel {
@@ -744,8 +733,14 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
 
     const loadImageModels = async () => {
       try {
-        const data = await fetchModels();
-        const available = filterImageModels(Array.isArray(data.data) ? data.data : []);
+        const data = await fetchImageModels();
+        const seen = new Set<string>();
+        const available = (Array.isArray(data.data) ? data.data : []).flatMap((item) => {
+          const id = String(item.id || "").trim();
+          if (!id || seen.has(id)) return [];
+          seen.add(id);
+          return [id];
+        });
         if (cancelled || available.length === 0) {
           return;
         }

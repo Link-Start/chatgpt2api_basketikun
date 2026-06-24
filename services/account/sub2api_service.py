@@ -566,7 +566,7 @@ class Sub2APIImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens, source_type="codex")
+        add_result = account_service.add_accounts(tokens)
         refresh_result = account_service.refresh_accounts(tokens)
         current = self._config.get_import_job(server_id) or {}
         self._update_job(

@@ -20,7 +20,7 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
+INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_step_timings"}
 
 
 class LogService:
@@ -157,6 +157,21 @@ def _collect_conversation_ids(value: object) -> list[str]:
     return ids
 
 
+def _collect_step_timings(value: object) -> list[dict[str, Any]]:
+    timings: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        direct = value.get("_step_timings")
+        if isinstance(direct, list):
+            timings.extend(item for item in direct if isinstance(item, dict))
+        for key, item in value.items():
+            if key != "_step_timings":
+                timings.extend(_collect_step_timings(item))
+    elif isinstance(value, list):
+        for item in value:
+            timings.extend(_collect_step_timings(item))
+    return timings
+
+
 def _strip_internal_response_fields(value: object) -> object:
     if isinstance(value, dict):
         return {
@@ -231,7 +246,7 @@ class LoggedCall:
             result = await run_in_threadpool(handler, *args)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
+                     conversation_id=getattr(exc, "conversation_id", ""), step_timings=getattr(exc, "step_timings", None))
             return _image_error_response(exc)
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
@@ -246,6 +261,7 @@ class LoggedCall:
             self.log("调用完成", result)
             response = dict(result)
             response.pop("_account_email", None)
+            response.pop("_step_timings", None)
             return response
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
@@ -253,7 +269,7 @@ class LoggedCall:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
+                     conversation_id=getattr(exc, "conversation_id", ""), step_timings=getattr(exc, "step_timings", None))
             return _image_error_response(exc)
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
@@ -272,12 +288,14 @@ class LoggedCall:
         urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
+        step_timings: list[dict[str, Any]] = []
         failed = False
         try:
             for item in items:
                 urls.extend(_collect_urls(item))
                 account_emails.extend(_collect_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
+                step_timings.extend(_collect_step_timings(item))
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
@@ -288,6 +306,7 @@ class LoggedCall:
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
+                step_timings=step_timings or getattr(exc, "step_timings", None),
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -297,10 +316,11 @@ class LoggedCall:
         finally:
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
-                         conversation_id=conversation_ids[0] if conversation_ids else "")
+                         conversation_id=conversation_ids[0] if conversation_ids else "", step_timings=step_timings)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
-            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "") -> None:
+            urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
+            step_timings: list[dict[str, Any]] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -334,4 +354,11 @@ class LoggedCall:
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls and not self.endpoint.startswith("/v1/search"):
             detail["urls"] = list(dict.fromkeys(collected_urls))
+        timings = [*(step_timings or []), *_collect_step_timings(result)]
+        if timings:
+            unique_timings: list[dict[str, Any]] = []
+            for item in timings:
+                if item not in unique_timings:
+                    unique_timings.append(item)
+            detail["step_timings"] = unique_timings
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)
