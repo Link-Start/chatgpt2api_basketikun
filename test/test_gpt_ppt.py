@@ -6,8 +6,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
-from uuid import uuid4
 
 BASE_URL = "http://127.0.0.1:8000"
 PROMPT = "生成一份 2026 年 Q2 电商运营复盘 PPT，8 页以内，商务科技风，包含销售、用户、渠道、广告、618 活动和 Q3 规划。"
@@ -35,8 +33,7 @@ def request_json(method: str, path: str, payload: dict | None = None) -> dict:
 
 
 def main() -> None:
-    task = request_json("POST", "/v1/ppt/generations", {
-        "client_task_id": str(uuid4()),
+    task = request_json("POST", "/api/ppt/tasks", {
         "prompt": PROMPT,
         "base64_images": BASE64_IMAGES,
     })
@@ -47,7 +44,7 @@ def main() -> None:
     deadline = time.time() + TIMEOUT_SECS
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL_SECS)
-        status = request_json("GET", "/v1/editable-file-tasks?ids=" + urllib.parse.quote(task_id))
+        status = request_json("GET", "/api/tasks?ids=" + urllib.parse.quote(task_id))
         print(json.dumps(status, ensure_ascii=False, indent=2))
         item = (status.get("items") or [{}])[0]
         if item.get("status") in {"success", "error"}:

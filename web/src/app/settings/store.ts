@@ -24,10 +24,7 @@ import {
   type CodexChannelsSettings,
   type CPAPool,
   type CPARemoteFile,
-  type ImageStorageMode,
   type ImageStorageSettings,
-  type ProxyRuntimeClearanceMode,
-  type ProxyRuntimeEgressMode,
   type ProxyRuntimeSettings,
   type RegisterConfig,
   type SettingsConfig,
@@ -37,29 +34,6 @@ import {
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
-
-const DEFAULT_PROXY_RUNTIME: ProxyRuntimeSettings = {
-  enabled: false,
-  egress_mode: "direct",
-  proxy_url: "",
-  resource_proxy_url: "",
-  skip_ssl_verify: false,
-  reset_session_status_codes: [403],
-  clearance: {
-    enabled: false,
-    mode: "none",
-    cf_cookies: "",
-    cf_clearance: "",
-    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-    browser: "chrome",
-    flaresolverr_url: "",
-    timeout_sec: 60,
-    refresh_interval: 3600,
-    warm_up_on_start: false,
-    has_cf_cookies: false,
-    has_cf_clearance: false,
-  },
-};
 
 const DEFAULT_THIRD_PARTY_APPS: ThirdPartyAppsSettings = {
   infinite_canvas: {
@@ -73,168 +47,9 @@ const DEFAULT_CODEX_CHANNELS: CodexChannelsSettings = {
 };
 
 const CODEX_SYSTEM_MODEL = "gpt-image-2";
-const CODEX_CHANNEL_TYPES = new Set(["system", "tool_call"]);
-
-function normalizeCodexChannelType(channel: Partial<CodexChannel> & { system?: boolean }) {
-  if (channel.system || channel.id === "system") return "system";
-  const type = String(channel.type || "").trim().toLowerCase();
-  if (CODEX_CHANNEL_TYPES.has(type)) return type as CodexChannel["type"];
-  return "tool_call";
-}
-
-function normalizeProxyRuntime(value: unknown): ProxyRuntimeSettings {
-  const source = typeof value === "object" && value !== null ? value as Partial<ProxyRuntimeSettings> : {};
-  const clearanceSource = typeof source.clearance === "object" && source.clearance !== null
-    ? source.clearance as Partial<ProxyRuntimeSettings["clearance"]>
-    : {};
-  const egressMode = source.egress_mode === "single_proxy" ? "single_proxy" : "direct";
-  const clearanceMode: ProxyRuntimeClearanceMode = clearanceSource.mode === "manual" || clearanceSource.mode === "flaresolverr"
-    ? clearanceSource.mode
-    : "none";
-  const statusCodes = Array.isArray(source.reset_session_status_codes)
-    ? source.reset_session_status_codes
-      .map((item) => Number(item))
-      .filter((item) => Number.isInteger(item) && item >= 100 && item <= 599)
-    : [];
-  return {
-    ...DEFAULT_PROXY_RUNTIME,
-    ...source,
-    enabled: Boolean(source.enabled),
-    egress_mode: egressMode as ProxyRuntimeEgressMode,
-    proxy_url: String(source.proxy_url || ""),
-    resource_proxy_url: String(source.resource_proxy_url || ""),
-    skip_ssl_verify: Boolean(source.skip_ssl_verify),
-    reset_session_status_codes: statusCodes.length > 0 ? statusCodes : [403],
-    clearance: {
-      ...DEFAULT_PROXY_RUNTIME.clearance,
-      ...clearanceSource,
-      enabled: Boolean(clearanceSource.enabled),
-      mode: clearanceMode,
-      cf_cookies: String(clearanceSource.cf_cookies || ""),
-      cf_clearance: String(clearanceSource.cf_clearance || ""),
-      user_agent: String(clearanceSource.user_agent || DEFAULT_PROXY_RUNTIME.clearance.user_agent),
-      browser: String(clearanceSource.browser || "chrome"),
-      flaresolverr_url: String(clearanceSource.flaresolverr_url || ""),
-      timeout_sec: Number(clearanceSource.timeout_sec || 60),
-      refresh_interval: Number(clearanceSource.refresh_interval || 3600),
-      warm_up_on_start: Boolean(clearanceSource.warm_up_on_start),
-      has_cf_cookies: Boolean(clearanceSource.has_cf_cookies),
-      has_cf_clearance: Boolean(clearanceSource.has_cf_clearance),
-    },
-  };
-}
-
-function normalizeThirdPartyApps(value: unknown): ThirdPartyAppsSettings {
-  const source = typeof value === "object" && value !== null ? value as Partial<ThirdPartyAppsSettings> : {};
-  const canvas = typeof source.infinite_canvas === "object" && source.infinite_canvas
-    ? source.infinite_canvas
-    : {};
-  return {
-    infinite_canvas: {
-      enabled: Boolean(canvas.enabled),
-      url: String(canvas.url || DEFAULT_THIRD_PARTY_APPS.infinite_canvas.url),
-    },
-  };
-}
 
 function normalizeMappedModel(channel: Partial<CodexChannel>) {
   return String(channel.mapped_model || channel.mapped_models?.[0] || "").trim();
-}
-
-function normalizeCodexChannels(value: unknown): CodexChannelsSettings {
-  const source = typeof value === "object" && value !== null ? value as Partial<CodexChannelsSettings> : {};
-  const channels = Array.isArray(source.channels) ? source.channels : [];
-  const system = channels.find((item) => typeof item === "object" && item !== null && normalizeCodexChannelType(item as Partial<CodexChannel> & { system?: boolean }) === "system") as Partial<CodexChannel> | undefined;
-  return {
-    channels: [
-      {
-        id: "system",
-        type: "system",
-        enabled: true,
-        name: "系统渠道",
-        base_url: "",
-        api_key: "",
-        upstream_model: "gpt-5.5",
-        weight: Number(system?.weight ?? 1),
-        mapped_models: [CODEX_SYSTEM_MODEL],
-        model_prefix: "",
-        mapped_model: CODEX_SYSTEM_MODEL,
-      },
-      ...channels.filter((item) => !(typeof item === "object" && item !== null && normalizeCodexChannelType(item as Partial<CodexChannel> & { system?: boolean }) === "system")).map((item, index) => {
-      const channel = typeof item === "object" && item !== null ? item as Partial<CodexChannel> : {};
-      const prefix = String(channel.model_prefix || "").trim().toLowerCase();
-      const upstreamModel = String(channel.upstream_model || "gpt-5.5").trim() || "gpt-5.5";
-      const mappedModel = normalizeMappedModel(channel) || (prefix ? `${prefix}-gpt-image-2` : "gpt-image-2");
-      return {
-        id: String(channel.id || `channel-${index + 1}`),
-        type: normalizeCodexChannelType(channel),
-        enabled: Boolean(channel.enabled),
-        name: String(channel.name || ""),
-        base_url: String(channel.base_url || ""),
-        api_key: String(channel.api_key || ""),
-        upstream_model: upstreamModel,
-        weight: Number(channel.weight ?? 1),
-        mapped_models: [mappedModel],
-        model_prefix: prefix,
-        mapped_model: mappedModel,
-      };
-    })],
-  };
-}
-
-function normalizeConfig(config: SettingsConfig): SettingsConfig {
-  const imageStorage = typeof config.image_storage === "object" && config.image_storage
-    ? config.image_storage as ImageStorageSettings
-    : {
-      enabled: false,
-      mode: "local",
-      webdav_url: "",
-      webdav_username: "",
-      webdav_password: "",
-      webdav_root_path: "chatgpt2api/images",
-      public_base_url: "",
-    };
-  const imageStorageMode: ImageStorageMode = imageStorage.enabled && imageStorage.mode === "both"
-    ? "both"
-    : imageStorage.enabled && imageStorage.mode === "webdav"
-      ? "webdav"
-      : "local";
-  return {
-    ...config,
-    refresh_account_interval_seconds: Number(config.refresh_account_interval_seconds || 300),
-    image_retention_days: Number(config.image_retention_days || 30),
-    image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
-    image_account_concurrency: Number(config.image_account_concurrency || 3),
-    image_settle_enabled: Boolean(config.image_settle_enabled !== false),
-    image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
-    image_settle_secs: Number(config.image_settle_secs || 2.0),
-    image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
-    auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
-    auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
-    log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
-    proxy: typeof config.proxy === "string" ? config.proxy : "",
-    base_url: typeof config.base_url === "string" ? config.base_url : "",
-    global_system_prompt: String(config.global_system_prompt || ""),
-    ai_review: {
-      enabled: Boolean(config.ai_review?.enabled),
-      base_url: String(config.ai_review?.base_url || ""),
-      api_key: String(config.ai_review?.api_key || ""),
-      model: String(config.ai_review?.model || ""),
-      prompt: String(config.ai_review?.prompt || ""),
-    },
-    image_storage: {
-      enabled: Boolean(imageStorage.enabled),
-      mode: imageStorageMode,
-      webdav_url: String(imageStorage.webdav_url || ""),
-      webdav_username: String(imageStorage.webdav_username || ""),
-      webdav_password: String(imageStorage.webdav_password || ""),
-      webdav_root_path: String(imageStorage.webdav_root_path || "chatgpt2api/images"),
-      public_base_url: String(imageStorage.public_base_url || ""),
-    },
-    proxy_runtime: normalizeProxyRuntime(config.proxy_runtime),
-    third_party_apps: normalizeThirdPartyApps(config.third_party_apps),
-    codex_channels: normalizeCodexChannels(config.codex_channels),
-  };
 }
 
 function normalizeFiles(items: CPARemoteFile[]) {
@@ -396,9 +211,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ isLoadingConfig: true });
     try {
       const data = await fetchSettingsConfig();
-      const normalized = normalizeConfig(data.config);
       set({
-        config: normalized,
+        config: data.config,
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载系统配置失败");
@@ -431,49 +245,46 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         base_url: String(config.base_url || "").trim(),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
         ai_review: {
-          enabled: Boolean(config.ai_review?.enabled),
-          base_url: String(config.ai_review?.base_url || "").trim(),
-          api_key: String(config.ai_review?.api_key || "").trim(),
-          model: String(config.ai_review?.model || "").trim(),
-          prompt: String(config.ai_review?.prompt || "").trim(),
+          enabled: Boolean(config.ai_review.enabled),
+          base_url: config.ai_review.base_url.trim(),
+          api_key: config.ai_review.api_key.trim(),
+          model: config.ai_review.model.trim(),
+          prompt: config.ai_review.prompt.trim(),
         },
         image_storage: {
-          enabled: Boolean(config.image_storage?.enabled),
-          mode: config.image_storage?.enabled && ["webdav", "both"].includes(String(config.image_storage?.mode)) ? config.image_storage.mode : "local",
-          webdav_url: String(config.image_storage?.webdav_url || "").trim(),
-          webdav_username: String(config.image_storage?.webdav_username || "").trim(),
-          webdav_password: String(config.image_storage?.webdav_password || "").trim(),
-          webdav_root_path: String(config.image_storage?.webdav_root_path || "chatgpt2api/images").trim(),
-          public_base_url: String(config.image_storage?.public_base_url || "").trim(),
+          enabled: Boolean(config.image_storage.enabled),
+          mode: config.image_storage.enabled && ["webdav", "both"].includes(config.image_storage.mode) ? config.image_storage.mode : "local",
+          webdav_url: config.image_storage.webdav_url.trim(),
+          webdav_username: config.image_storage.webdav_username.trim(),
+          webdav_password: config.image_storage.webdav_password.trim(),
+          webdav_root_path: config.image_storage.webdav_root_path.trim(),
+          public_base_url: config.image_storage.public_base_url.trim(),
         },
         proxy_runtime: {
-          ...normalizeProxyRuntime(config.proxy_runtime),
-          proxy_url: String(config.proxy_runtime?.proxy_url || "").trim(),
-          resource_proxy_url: String(config.proxy_runtime?.resource_proxy_url || "").trim(),
-          reset_session_status_codes: normalizeProxyRuntime({
-            reset_session_status_codes: (config.proxy_runtime?.reset_session_status_codes || [403])
-              .map((item) => Number(item))
-              .filter((item) => Number.isInteger(item) && item >= 100 && item <= 599),
-          }).reset_session_status_codes,
+          ...config.proxy_runtime,
+          proxy_url: config.proxy_runtime.proxy_url.trim(),
+          resource_proxy_url: config.proxy_runtime.resource_proxy_url.trim(),
+          reset_session_status_codes: config.proxy_runtime.reset_session_status_codes
+            .map((item) => Number(item)),
           clearance: {
-            ...normalizeProxyRuntime(config.proxy_runtime).clearance,
-            cf_cookies: String(config.proxy_runtime?.clearance?.cf_cookies || "").trim(),
-            cf_clearance: String(config.proxy_runtime?.clearance?.cf_clearance || "").trim(),
-            user_agent: String(config.proxy_runtime?.clearance?.user_agent || DEFAULT_PROXY_RUNTIME.clearance.user_agent).trim(),
-            browser: String(config.proxy_runtime?.clearance?.browser || "chrome").trim(),
-            flaresolverr_url: String(config.proxy_runtime?.clearance?.flaresolverr_url || "").trim(),
-            timeout_sec: Math.max(1, Number(config.proxy_runtime?.clearance?.timeout_sec) || 60),
-            refresh_interval: Math.max(60, Number(config.proxy_runtime?.clearance?.refresh_interval) || 3600),
+            ...config.proxy_runtime.clearance,
+            cf_cookies: config.proxy_runtime.clearance.cf_cookies.trim(),
+            cf_clearance: config.proxy_runtime.clearance.cf_clearance.trim(),
+            user_agent: config.proxy_runtime.clearance.user_agent.trim(),
+            browser: config.proxy_runtime.clearance.browser.trim(),
+            flaresolverr_url: config.proxy_runtime.clearance.flaresolverr_url.trim(),
+            timeout_sec: Math.max(1, Number(config.proxy_runtime.clearance.timeout_sec)),
+            refresh_interval: Math.max(60, Number(config.proxy_runtime.clearance.refresh_interval)),
           },
         },
         third_party_apps: {
           infinite_canvas: {
-            enabled: Boolean(config.third_party_apps?.infinite_canvas?.enabled),
-            url: String(config.third_party_apps?.infinite_canvas?.url || DEFAULT_THIRD_PARTY_APPS.infinite_canvas.url).trim(),
+            enabled: Boolean(config.third_party_apps.infinite_canvas.enabled),
+            url: config.third_party_apps.infinite_canvas.url.trim(),
           },
         },
         codex_channels: {
-          channels: normalizeCodexChannels(config.codex_channels).channels.map((channel) => ({
+          channels: (config.codex_channels || DEFAULT_CODEX_CHANNELS).channels.map((channel) => ({
             ...channel,
             name: String(channel.name || "").trim(),
             base_url: String(channel.base_url || "").trim(),
@@ -486,7 +297,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         },
       });
       set({
-        config: normalizeConfig(data.config),
+        config: data.config,
       });
       window.dispatchEvent(new Event("third-party-apps-updated"));
       toast.success("配置已保存");
@@ -624,15 +435,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const runtime = normalizeProxyRuntime(state.config.proxy_runtime);
-      const nextRuntime = normalizeProxyRuntime({
+      const runtime = state.config.proxy_runtime;
+      const nextRuntime = {
         ...runtime,
         [key]: value,
-      });
+      };
       return {
         config: {
           ...state.config,
-          proxy_runtime: nextRuntime,
+          proxy_runtime: nextRuntime as ProxyRuntimeSettings,
         },
       };
     });
@@ -643,18 +454,17 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const runtime = normalizeProxyRuntime(state.config.proxy_runtime);
-      const nextRuntime = normalizeProxyRuntime({
+      const nextRuntime = {
         ...runtime,
         clearance: {
           ...runtime.clearance,
           [key]: value,
         },
-      });
+      };
       return {
         config: {
           ...state.config,
-          proxy_runtime: nextRuntime,
+          proxy_runtime: nextRuntime as ProxyRuntimeSettings,
         },
       };
     });
@@ -669,14 +479,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const runtime = normalizeProxyRuntime(state.config.proxy_runtime);
+      const runtime = state.config.proxy_runtime;
       return {
         config: {
           ...state.config,
-          proxy_runtime: normalizeProxyRuntime({
+          proxy_runtime: {
             ...runtime,
             reset_session_status_codes: codes.length > 0 ? codes : [403],
-          }),
+          } as ProxyRuntimeSettings,
         },
       };
     });
@@ -687,7 +497,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const apps = normalizeThirdPartyApps(state.config.third_party_apps);
+      const apps = state.config.third_party_apps || DEFAULT_THIRD_PARTY_APPS;
       return {
         config: {
           ...state.config,
@@ -708,7 +518,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const settings = normalizeCodexChannels(state.config.codex_channels || DEFAULT_CODEX_CHANNELS);
+      const settings = state.config.codex_channels || DEFAULT_CODEX_CHANNELS;
       const id = `channel-${Date.now()}`;
       return {
         config: {
@@ -741,7 +551,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const settings = normalizeCodexChannels(state.config.codex_channels || DEFAULT_CODEX_CHANNELS);
+      const settings = state.config.codex_channels || DEFAULT_CODEX_CHANNELS;
       return {
         config: {
           ...state.config,
@@ -771,7 +581,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!state.config) {
         return {};
       }
-      const settings = normalizeCodexChannels(state.config.codex_channels || DEFAULT_CODEX_CHANNELS);
+      const settings = state.config.codex_channels || DEFAULT_CODEX_CHANNELS;
       return {
         config: {
           ...state.config,

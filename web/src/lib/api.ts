@@ -76,14 +76,12 @@ type AccountMutationResponse = {
   skipped?: number;
   removed?: number;
   refreshed?: number;
-  errors?: Array<{ access_token: string; error: string }>;
+  failed?: number;
 };
 
 export type AccountRefreshResponse = {
-  items: Account[];
   refreshed: number;
-  skipped?: number;
-  errors: Array<{ access_token: string; error: string }>;
+  failed: number;
 };
 
 type AccountUpdateResponse = {
@@ -130,11 +128,6 @@ export type ProxyRuntimeStatus = {
   cached_clearance_hosts: string[];
 };
 
-export type ProxyRuntimeResponse = {
-  runtime: ProxyRuntimeSettings;
-  status: ProxyRuntimeStatus;
-};
-
 export type ThirdPartyAppsSettings = {
   infinite_canvas: {
     enabled: boolean;
@@ -169,12 +162,12 @@ export type SettingsConfig = {
   proxy: string;
   base_url?: string;
   global_system_prompt?: string;
-  ai_review?: {
-    enabled?: boolean;
-    base_url?: string;
-    api_key?: string;
-    model?: string;
-    prompt?: string;
+  ai_review: {
+    enabled: boolean;
+    base_url: string;
+    api_key: string;
+    model: string;
+    prompt: string;
   };
   refresh_account_interval_seconds?: number | string;
   image_retention_days?: number | string;
@@ -188,10 +181,10 @@ export type SettingsConfig = {
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
-  image_storage?: ImageStorageSettings;
-  proxy_runtime?: ProxyRuntimeSettings;
-  third_party_apps?: ThirdPartyAppsSettings;
-  codex_channels?: CodexChannelsSettings;
+  image_storage: ImageStorageSettings;
+  proxy_runtime: ProxyRuntimeSettings;
+  third_party_apps: ThirdPartyAppsSettings;
+  codex_channels: CodexChannelsSettings;
   [key: string]: unknown;
 };
 
@@ -224,7 +217,9 @@ export type ImageResponse = {
 
 export type ImageTask = {
   id: string;
+  taskId?: string;
   status: "queued" | "running" | "success" | "error";
+  kind?: "image" | "ppt" | "psd" | string;
   mode: "generate" | "edit";
   model?: ImageModel;
   size?: string;
@@ -232,16 +227,62 @@ export type ImageTask = {
   created_at: string;
   updated_at: string;
   conversation_id?: string;
+  turn_id?: string;
+  request?: {
+    prompt?: string;
+    size?: string;
+    quality?: string;
+    input_urls?: string[];
+  };
+  result?: {
+    items?: Array<{ type?: string; url?: string; revised_prompt?: string; primary_url?: string; zip_url?: string }>;
+    usage?: Record<string, unknown>;
+    primary_url?: string;
+    zip_url?: string;
+    conversation_id?: string;
+  };
   data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
   error?: string;
   progress?: string;
   elapsed_secs?: number;
+  elapsed_seconds?: number;
   duration_ms?: number;
 };
 
 type ImageTaskListResponse = {
   items: ImageTask[];
   missing_ids: string[];
+};
+
+export type TaskStatus = "queued" | "running" | "success" | "error";
+
+export type ConversationTask = ImageTask;
+
+export type ConversationTurn = {
+  id: string;
+  mode: "generate" | "edit";
+  prompt: string;
+  model: ImageModel;
+  size?: string;
+  quality?: string;
+  ratio?: string;
+  tier?: string;
+  count?: number;
+  reference_images?: Array<{ url: string; name: string; mime_type: string }>;
+  task_ids: string[];
+  tasks: ConversationTask[];
+  status: "queued" | "generating" | "success" | "error";
+  created_at: string;
+};
+
+export type GenerationConversation = {
+  id: string;
+  owner_id?: string;
+  kind: "image" | "ppt" | "psd" | string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turns: ConversationTurn[];
 };
 
 export type LoginResponse = {
@@ -259,14 +300,6 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
-};
-
-export type OutlookPoolStats = {
-  unused: number;
-  in_use: number;
-  used: number;
-  token_invalid: number;
-  failed: number;
 };
 
 export type RegisterConfig = {
@@ -430,26 +463,43 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   );
 }
 
-export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string, quality = "auto") {
-  return httpRequest<ImageTask>("/api/image-tasks/generations", {
+export async function createImageGenerationTurn(payload: {
+  conversation_id?: string;
+  prompt: string;
+  model?: ImageModel;
+  size?: string;
+  quality?: string;
+  count?: number;
+  ratio?: string;
+  tier?: string;
+}) {
+  return httpRequest<GenerationConversation>("/api/image-turns/generations", {
     method: "POST",
     body: {
-      client_task_id: clientTaskId,
-      prompt,
-      ...(model ? { model } : {}),
-      ...(size ? { size } : {}),
-      quality,
+      conversation_id: payload.conversation_id || "",
+      prompt: payload.prompt,
+      ...(payload.model ? { model: payload.model } : {}),
+      ...(payload.size ? { size: payload.size } : {}),
+      quality: payload.quality || "auto",
+      count: payload.count || 1,
+      ratio: payload.ratio || "1:1",
+      tier: payload.tier || "1k",
     },
   });
 }
 
-export async function createImageEditTask(
-  clientTaskId: string,
+export async function createImageEditTurn(
+  payload: {
+    conversation_id?: string;
+    prompt: string;
+    model?: ImageModel;
+    size?: string;
+    quality?: string;
+    count?: number;
+    ratio?: string;
+    tier?: string;
+  },
   files: File | File[],
-  prompt: string,
-  model?: ImageModel,
-  size?: string,
-  quality = "auto",
 ) {
   const formData = new FormData();
   const uploadFiles = Array.isArray(files) ? files : [files];
@@ -457,35 +507,86 @@ export async function createImageEditTask(
   uploadFiles.forEach((file) => {
     formData.append("image", file);
   });
-  formData.append("client_task_id", clientTaskId);
-  formData.append("prompt", prompt);
-  if (model) {
-    formData.append("model", model);
+  formData.append("conversation_id", payload.conversation_id || "");
+  formData.append("prompt", payload.prompt);
+  if (payload.model) {
+    formData.append("model", payload.model);
   }
-  if (size) {
-    formData.append("size", size);
+  if (payload.size) {
+    formData.append("size", payload.size);
   }
-  formData.append("quality", quality);
+  formData.append("quality", payload.quality || "auto");
+  formData.append("count", String(payload.count || 1));
+  formData.append("ratio", payload.ratio || "1:1");
+  formData.append("tier", payload.tier || "1k");
 
-  return httpRequest<ImageTask>("/api/image-tasks/edits", {
+  return httpRequest<GenerationConversation>("/api/image-turns/edits", {
     method: "POST",
     body: formData,
   });
 }
 
-export async function fetchImageTasks(ids: string[]) {
+export async function fetchTasks(ids: string[], kind = "") {
   const params = new URLSearchParams();
   if (ids.length > 0) {
     params.set("ids", ids.join(","));
   }
+  if (kind) {
+    params.set("kind", kind);
+  }
   params.set("_t", String(Date.now()));
-  return httpRequest<ImageTaskListResponse>(`/api/image-tasks?${params.toString()}`);
+  return httpRequest<ImageTaskListResponse>(`/api/tasks?${params.toString()}`);
+}
+
+export async function fetchImageTasks(ids: string[]) {
+  return fetchTasks(ids, "image");
+}
+
+export async function fetchConversations(kind: string) {
+  const params = new URLSearchParams({ kind, _t: String(Date.now()) });
+  return httpRequest<{ items: GenerationConversation[] }>(`/api/conversations?${params.toString()}`);
+}
+
+export async function deleteConversation(id: string) {
+  return httpRequest<{ removed: number }>(`/api/conversations/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function clearConversations(kind: string) {
+  return httpRequest<{ removed: number }>(`/api/conversations?kind=${encodeURIComponent(kind)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function renameConversation(id: string, title: string) {
+  return httpRequest<GenerationConversation>(`/api/conversations/${encodeURIComponent(id)}/rename`, {
+    method: "POST",
+    body: { title },
+  });
+}
+
+export async function deleteConversationTurnPart(id: string, turnId: string, part: "prompt" | "results") {
+  return httpRequest<GenerationConversation | { removed: number }>(
+    `/api/conversations/${encodeURIComponent(id)}/turns/${encodeURIComponent(turnId)}/${part}`,
+    { method: "DELETE" },
+  );
 }
 
 export async function resumeImagePoll(taskId: string, extraTimeoutSecs = 30) {
-  return httpRequest<ImageTask>(`/api/image-tasks/${encodeURIComponent(taskId)}/resume-poll`, {
+  return httpRequest<ImageTask>(`/api/tasks/${encodeURIComponent(taskId)}/resume-poll`, {
     method: "POST",
     body: { extra_timeout_secs: extraTimeoutSecs },
+  });
+}
+
+export async function createEditableTask(kind: "ppt" | "psd", prompt: string, base64Images: string[]) {
+  return httpRequest<ImageTask>(`/api/${kind}/tasks`, {
+    method: "POST",
+    body: {
+      prompt,
+      base64_images: base64Images,
+    },
   });
 }
 
@@ -719,10 +820,6 @@ export async function startCPAImport(poolId: string, names: string[]) {
   });
 }
 
-export async function fetchCPAPoolImportJob(poolId: string) {
-  return httpRequest<{ import_job: CPAImportJob | null }>(`/api/cpa/pools/${poolId}/import`);
-}
-
 // ── Sub2API ────────────────────────────────────────────────────────
 
 export type Sub2APIServer = {
@@ -815,10 +912,6 @@ export async function startSub2APIImport(serverId: string, accountIds: string[])
   });
 }
 
-export async function fetchSub2APIImportJob(serverId: string) {
-  return httpRequest<{ import_job: CPAImportJob | null }>(`/api/sub2api/servers/${serverId}/import`);
-}
-
 // ── Upstream proxy ────────────────────────────────────────────────
 
 export type ProxySettings = {
@@ -860,17 +953,6 @@ export async function testProxy(url?: string) {
   return httpRequest<{ result: ProxyTestResult }>("/api/proxy/test", {
     method: "POST",
     body: { url: url ?? "" },
-  });
-}
-
-export async function fetchProxyRuntime() {
-  return httpRequest<ProxyRuntimeResponse>("/api/proxy/runtime");
-}
-
-export async function updateProxyRuntime(runtime: ProxyRuntimeSettings) {
-  return httpRequest<ProxyRuntimeResponse>("/api/proxy/runtime", {
-    method: "POST",
-    body: runtime,
   });
 }
 

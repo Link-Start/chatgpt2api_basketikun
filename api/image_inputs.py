@@ -50,13 +50,13 @@ def _parse_bool(value: object) -> bool | None:
 
 
 def _parse_count(value: object) -> int:
-    """解析生成数量：保持图片接口的 1 到 4 限制。"""
+    """解析生成数量。"""
     try:
         count = int(value or 1)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": "n must be an integer"}) from exc
-    if count < 1 or count > 4:
-        raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
+    if count < 1 or count > 10:
+        raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 10"})
     return count
 
 
@@ -74,8 +74,14 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
         "response_format": _clean(fields.get("response_format"), "b64_json"),
         "stream": _parse_bool(fields.get("stream")),
     }
-    if "client_task_id" in fields:
-        payload["client_task_id"] = _clean(fields.get("client_task_id"))
+    if "conversation_id" in fields:
+        payload["conversation_id"] = _clean(fields.get("conversation_id"))
+    if "count" in fields:
+        payload["count"] = _parse_count(fields.get("count"))
+    if "ratio" in fields:
+        payload["ratio"] = _clean(fields.get("ratio"), "1:1")
+    if "tier" in fields:
+        payload["tier"] = _clean(fields.get("tier"), "1k")
     return payload
 
 
@@ -183,7 +189,7 @@ async def parse_image_edit_request(request: Request) -> tuple[dict[str, Any], li
 
     form = await request.form()
     fields: dict[str, Any] = {}
-    for key in ("client_task_id", "prompt", "model", "n", "size", "quality", "response_format", "stream"):
+    for key in ("conversation_id", "prompt", "model", "n", "count", "size", "quality", "ratio", "tier", "response_format", "stream"):
         value = form.get(key)
         if isinstance(value, str):
             fields[key] = value

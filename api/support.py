@@ -81,12 +81,13 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_seconds
+    watch_interval_seconds = min(60, max(5, interval_seconds // 5))
 
     def worker() -> None:
         while not stop_event.is_set():
             try:
-                limited_tokens = account_service.list_limited_tokens()
-                normal_tokens = account_service.list_normal_tokens()
+                limited_tokens = account_service.list_due_refresh_tokens("限流")
+                normal_tokens = account_service.list_due_refresh_tokens("正常")
                 expiring_tokens = account_service.list_expiring_access_tokens()
                 keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
                 tokens = list(dict.fromkeys([*limited_tokens, *normal_tokens, *expiring_tokens]))
@@ -95,8 +96,8 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                 if tokens:
                     print(
                         "[account-watcher] checking "
-                        f"{len(limited_tokens)} limited accounts, "
-                        f"{len(normal_tokens)} normal accounts, "
+                        f"{len(limited_tokens)} due limited accounts, "
+                        f"{len(normal_tokens)} due normal accounts, "
                         f"{len(expiring_tokens)} expiring access tokens"
                     )
                     account_service.refresh_accounts(tokens)
@@ -107,7 +108,7 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                         print(f"[account-watcher] keepalive errors: {result['errors']}")
             except Exception as exc:
                 print(f"[account-watcher] fail {exc}")
-            stop_event.wait(interval_seconds)
+            stop_event.wait(watch_interval_seconds)
 
     thread = Thread(target=worker, name="account-watcher", daemon=True)
     thread.start()

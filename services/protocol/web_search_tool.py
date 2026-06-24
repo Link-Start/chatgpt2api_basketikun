@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from services.account.account_service import account_service
-from services.openai_backend_api import OpenAIBackendAPI
+from services.protocol.openai_backend_api import OpenAIBackendAPI
 
 WEB_SEARCH_TOOL_TYPES = {"web_search", "web_search_preview", "web_search_preview_2025_03_11"}
 SEARCH_CHAT_MODEL_PREFIXES = (

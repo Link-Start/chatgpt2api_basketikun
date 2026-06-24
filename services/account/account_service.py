@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,21 +14,21 @@ from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
+from utils.date_utils import parse_time, utc_now_text
 from utils.helper import anonymize_token
 
 
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
-    _NEW_ACCOUNT_INVALID_GRACE_SECONDS = 10 * 60
-    _INVALID_CONFIRM_SECONDS = 30
-    _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 24 * 60 * 60
-    _REFRESH_TOKEN_KEEPALIVE_SECONDS = 3 * 24 * 60 * 60
-    _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
-    _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
-    _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
-    _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
-    _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
+    _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 24 * 60 * 60  # access_token 剩余不足 24 小时时提前刷新
+    _REFRESH_TOKEN_KEEPALIVE_SECONDS = 3 * 24 * 60 * 60  # refresh_token 每 3 天保活一次
+    _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60  # 保活失败后 6 小时内不重试
+    _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3  # watcher 每轮最多保活的 refresh_token 数
+    _ACCOUNT_REFRESH_BATCH_SIZE = 1  # watcher 每轮每类状态最多刷新 1 个账号
+    _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60  # access_token 刷新失败后 5 分钟内不重试
+    _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"  # OpenAI OAuth token endpoint
+    _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"  # ChatGPT Web OAuth client id
     _OAUTH_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -35,6 +36,7 @@ class AccountService:
     )
 
     def __init__(self, accounts_file: Path | None = None):
+        """初始化账号存储、索引和运行时并发状态。"""
         self.accounts_file = accounts_file or DATA_DIR / "accounts.json"
         self.accounts_file.parent.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
@@ -45,33 +47,10 @@ class AccountService:
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
         self._refreshing_tokens: set[str] = set()
-        self._cumulative_total = self._load_cumulative_total()
-
-    def _get_cumulative_file(self) -> Path:
-        from services.config import DATA_DIR
-        return DATA_DIR / ".cumulative_total"
-
-    def _load_cumulative_total(self) -> int:
-        try:
-            f = self._get_cumulative_file()
-            if f.exists():
-                return int(f.read_text().strip())
-        except Exception:
-            pass
-        return len(self._accounts)
-
-    def _save_cumulative_total(self) -> None:
-        try:
-            self._get_cumulative_file().write_text(str(self._cumulative_total))
-        except Exception:
-            pass
-
-    @staticmethod
-    def _now() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def _decode_jwt_payload(token: str) -> dict:
+        """解码 JWT payload，失败时返回空字典。"""
         try:
             payload = str(token or "").split(".")[1]
             payload += "=" * ((4 - len(payload) % 4) % 4)
@@ -82,32 +61,8 @@ class AccountService:
         except Exception:
             return {}
 
-    @staticmethod
-    def _parse_time(value: object) -> datetime | None:
-        raw = str(value or "").strip()
-        if not raw:
-            return None
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except Exception:
-            try:
-                parsed = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-
-    @staticmethod
-    def _timestamp_to_iso(value: object) -> str:
-        try:
-            ts = int(value)
-        except (TypeError, ValueError):
-            return ""
-        tz = timezone(timedelta(hours=8))
-        return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz).isoformat()
-
     def _load_accounts(self) -> dict[str, dict]:
+        """从账号文件加载并按 access_token 建索引。"""
         if not self.accounts_file.exists():
             accounts = []
         else:
@@ -123,6 +78,7 @@ class AccountService:
         }
 
     def _save_accounts(self) -> None:
+        """把账号索引写回账号文件。"""
         self.accounts_file.write_text(
             json.dumps(list(self._accounts.values()), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -130,6 +86,7 @@ class AccountService:
 
     @staticmethod
     def _is_image_account_available(account: dict) -> bool:
+        """判断账号是否可参与图片任务调度。"""
         if not isinstance(account, dict):
             return False
         if account.get("status") in {"禁用", "限流", "异常"}:
@@ -140,6 +97,7 @@ class AccountService:
 
     @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
+        """判断账号套餐类型是否匹配指定套餐。"""
         if not plan_type:
             return True
         normalized_plan = cls._normalize_account_type(plan_type)
@@ -150,12 +108,15 @@ class AccountService:
 
     @classmethod
     def _account_matches_source_type(cls, account: dict, source_type: str | None = None) -> bool:
+        """判断账号来源是否匹配指定来源。"""
         if not source_type:
             return True
         return cls._normalize_source_type(account.get("source_type")) == cls._normalize_source_type(source_type)
 
     @classmethod
-    def _account_matches_any_plan_type(cls, account: dict, plan_types: set[str] | tuple[str, ...] | None = None) -> bool:
+    def _account_matches_any_plan_type(cls, account: dict,
+                                       plan_types: set[str] | tuple[str, ...] | None = None) -> bool:
+        """判断账号套餐是否命中任一目标套餐。"""
         if not plan_types:
             return True
         normalized_account = cls._normalize_account_type(account.get("type"))
@@ -168,10 +129,12 @@ class AccountService:
 
     @staticmethod
     def _normalize_source_type(value: object) -> str:
+        """标准化账号来源字段。"""
         return str(value or "web").strip().lower() or "web"
 
     @staticmethod
     def _normalize_account_type(value: object) -> str | None:
+        """标准化账号套餐名称。"""
         raw = str(value or "").strip()
         if not raw:
             return None
@@ -188,24 +151,8 @@ class AccountService:
         }
         return aliases.get(compact) or aliases.get(key) or raw
 
-    def _search_account_type(self, payload: object) -> str | None:
-        if isinstance(payload, dict):
-            for key in ("plan_type", "account_plan", "account_type", "subscription_type", "type"):
-                plan = self._normalize_account_type(payload.get(key))
-                if plan:
-                    return plan
-            for value in payload.values():
-                plan = self._search_account_type(value)
-                if plan:
-                    return plan
-        elif isinstance(payload, list):
-            for value in payload:
-                plan = self._search_account_type(value)
-                if plan:
-                    return plan
-        return None
-
     def _normalize_account(self, item: dict) -> dict | None:
+        """把输入账号数据整理成内部统一结构。"""
         if not isinstance(item, dict):
             return None
         access_token = item.get("access_token") or item.get("accessToken") or ""
@@ -234,20 +181,21 @@ class AccountService:
         normalized["restore_at"] = normalized.get("restore_at") or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
-        normalized["invalid_count"] = int(normalized.get("invalid_count") or 0)
+        normalized.pop("invalid_count", None)
         normalized["last_used_at"] = normalized.get("last_used_at")
-        normalized["last_invalid_at"] = normalized.get("last_invalid_at") or None
+        normalized.pop("last_invalid_at", None)
         normalized["last_refresh_error"] = normalized.get("last_refresh_error") or None
         normalized["last_refresh_error_at"] = normalized.get("last_refresh_error_at") or None
         normalized["last_refreshed_at"] = normalized.get("last_refreshed_at") or None
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
-        normalized["created_at"] = normalized.get("created_at") or AccountService._now()
+        normalized["created_at"] = normalized.get("created_at") or utc_now_text()
         return normalized
 
     @staticmethod
     def _jwt_exp(access_token: str) -> int:
+        """读取 access_token 的过期时间戳。"""
         try:
             return int(AccountService._decode_jwt_payload(access_token).get("exp") or 0)
         except (TypeError, ValueError):
@@ -255,6 +203,7 @@ class AccountService:
 
     @classmethod
     def _token_expires_in(cls, access_token: str) -> int | None:
+        """返回 access_token 距离过期的秒数。"""
         exp = cls._jwt_exp(access_token)
         if exp <= 0:
             return None
@@ -262,6 +211,7 @@ class AccountService:
 
     @classmethod
     def _token_needs_refresh(cls, access_token: str, *, force: bool = False) -> bool:
+        """判断 access_token 是否需要刷新。"""
         if force:
             return True
         remaining = cls._token_expires_in(access_token)
@@ -269,6 +219,7 @@ class AccountService:
 
     @classmethod
     def _token_issued_at(cls, access_token: str) -> datetime | None:
+        """读取 access_token 的签发时间。"""
         try:
             iat = int(cls._decode_jwt_payload(access_token).get("iat") or 0)
         except (TypeError, ValueError):
@@ -279,12 +230,14 @@ class AccountService:
 
     @staticmethod
     def _safe_response_text(response: object, limit: int = 300) -> str:
+        """截取上游响应文本用于错误信息。"""
         try:
             return str(getattr(response, "text", "") or "")[:limit]
         except Exception:
             return ""
 
     def _resolve_access_token_locked(self, access_token: str) -> str:
+        """在持锁状态下解析 token 轮换后的当前 token。"""
         token = str(access_token or "").strip()
         seen: set[str] = set()
         while token and token not in self._accounts and token in self._token_aliases and token not in seen:
@@ -293,18 +246,21 @@ class AccountService:
         return token
 
     def resolve_access_token(self, access_token: str) -> str:
+        """解析 token 轮换后的当前 token。"""
         if not access_token:
             return ""
         with self._lock:
             return self._resolve_access_token_locked(access_token)
 
     def _get_account_for_token(self, access_token: str) -> tuple[str, dict | None]:
+        """按 token 获取当前账号副本。"""
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)
             account = self._accounts.get(resolved)
             return resolved, dict(account) if account else None
 
     def _record_token_refresh_error(self, access_token: str, event: str, error: str) -> None:
+        """记录 refresh_token 刷新 access_token 的错误。"""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)
@@ -325,25 +281,29 @@ class AccountService:
         )
 
     def _recent_token_refresh_error(self, account: dict) -> bool:
-        last_error_at = self._parse_time(account.get("last_token_refresh_error_at"))
+        """判断账号最近是否发生过 access_token 刷新错误。"""
+        last_error_at = parse_time(account.get("last_token_refresh_error_at"))
         if last_error_at is None:
             return False
         return (datetime.now(timezone.utc) - last_error_at).total_seconds() < self._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
 
     def _recent_refresh_token_keepalive_error(self, account: dict, now: datetime) -> bool:
-        last_error_at = self._parse_time(account.get("last_token_refresh_error_at"))
+        """判断 refresh_token keepalive 是否处于错误退避期。"""
+        last_error_at = parse_time(account.get("last_token_refresh_error_at"))
         if last_error_at is None:
             return False
         return (now - last_error_at).total_seconds() < self._REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS
 
     def _refresh_token_keepalive_anchor(self, account: dict) -> datetime | None:
+        """计算 refresh_token keepalive 的起始参考时间。"""
         return (
-            self._parse_time(account.get("last_token_refresh_at"))
-            or self._token_issued_at(str(account.get("access_token") or ""))
-            or self._parse_time(account.get("created_at"))
+                parse_time(account.get("last_token_refresh_at"))
+                or self._token_issued_at(str(account.get("access_token") or ""))
+                or parse_time(account.get("created_at"))
         )
 
     def _refresh_token_keepalive_due_at(self, account: dict, now: datetime) -> datetime | None:
+        """返回账号 refresh_token keepalive 到期时间。"""
         if not str(account.get("refresh_token") or "").strip():
             return None
         if account.get("status") == "禁用":
@@ -356,7 +316,21 @@ class AccountService:
         due_at = anchor + timedelta(seconds=self._REFRESH_TOKEN_KEEPALIVE_SECONDS)
         return due_at if due_at <= now else None
 
+    def _account_refresh_due_at(self, account: dict, now: datetime) -> datetime:
+        """返回账号信息刷新到期时间。"""
+        interval_seconds = config.refresh_account_interval_seconds
+        last_refreshed_at = parse_time(account.get("last_refreshed_at"))
+        if last_refreshed_at is not None:
+            return last_refreshed_at + timedelta(seconds=interval_seconds)
+
+        token = str(account.get("access_token") or "")
+        digest = hashlib.sha1(token.encode("utf-8")).hexdigest()
+        offset_seconds = int(digest[:8], 16) % interval_seconds
+        created_at = parse_time(account.get("created_at")) or now
+        return created_at + timedelta(seconds=offset_seconds)
+
     def _request_access_token_refresh(self, refresh_token: str, account: dict | None = None) -> dict[str, str]:
+        """调用 OAuth 接口用 refresh_token 换取新 token。"""
         import httpx
         from services.proxy_service import proxy_settings
 
@@ -393,6 +367,7 @@ class AccountService:
             session.close()
 
     def _apply_refreshed_tokens(self, old_access_token: str, token_data: dict, event: str) -> str:
+        """把刷新得到的新 token 写回账号池。"""
         now = datetime.now(timezone.utc).isoformat()
         with self._image_slot_condition:
             old_token = self._resolve_access_token_locked(old_access_token)
@@ -412,8 +387,6 @@ class AccountService:
             next_item["last_token_refresh_at"] = now
             next_item["last_token_refresh_error"] = None
             next_item["last_token_refresh_error_at"] = None
-            next_item["invalid_count"] = 0
-            next_item["last_invalid_at"] = None
             next_item["last_refresh_error"] = None
             next_item["last_refresh_error_at"] = None
 
@@ -439,7 +412,9 @@ class AccountService:
         )
         return new_token
 
-    def refresh_access_token(self, access_token: str, *, force: bool = False, event: str = "refresh_access_token") -> str:
+    def refresh_access_token(self, access_token: str, *, force: bool = False,
+                             event: str = "refresh_access_token") -> str:
+        """按需刷新 access_token 并返回当前可用 token。"""
         if not access_token:
             return ""
         with self._token_refresh_lock:
@@ -462,16 +437,18 @@ class AccountService:
             return self._apply_refreshed_tokens(active_token, token_data, event)
 
     def list_expiring_access_tokens(self) -> list[str]:
+        """列出即将过期且可用 refresh_token 续期的 access_token。"""
         with self._lock:
             return [
                 token
                 for account in self._accounts.values()
                 if str(account.get("refresh_token") or "").strip()
-                and (token := str(account.get("access_token") or "").strip())
-                and self._token_needs_refresh(token)
+                   and (token := str(account.get("access_token") or "").strip())
+                   and self._token_needs_refresh(token)
             ]
 
     def list_refresh_token_keepalive_tokens(self) -> list[str]:
+        """列出需要执行 refresh_token keepalive 的账号 token。"""
         now = datetime.now(timezone.utc)
         due_items: list[tuple[datetime, str]] = []
         with self._lock:
@@ -484,6 +461,7 @@ class AccountService:
         return [token for _, token in due_items[: self._REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE]]
 
     def keepalive_refresh_tokens(self, access_tokens: list[str]) -> dict[str, Any]:
+        """批量执行 refresh_token keepalive。"""
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
             return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
@@ -510,6 +488,7 @@ class AccountService:
         }
 
     def list_tokens(self) -> list[str]:
+        """列出当前所有 access_token。"""
         with self._lock:
             return list(self._accounts)
 
@@ -520,6 +499,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
+        """列出状态和筛选条件满足图片调度的候选 token。"""
         excluded = set(excluded_tokens or set())
         return [
             token
@@ -539,6 +519,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
+        """列出当前图片并发槽未满的候选 token。"""
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
@@ -553,6 +534,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> str:
+        """占用一个图片并发槽并返回对应 token。"""
         with self._image_slot_condition:
             while True:
                 if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
@@ -569,6 +551,7 @@ class AccountService:
                 self._image_slot_condition.wait(timeout=1.0)
 
     def release_image_slot(self, access_token: str) -> None:
+        """释放账号图片并发槽。"""
         if not access_token:
             return
         with self._image_slot_condition:
@@ -620,11 +603,13 @@ class AccountService:
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
         raise RuntimeError(
-            f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
+            f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace(
+                "  ", " ").strip()
             if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
         )
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        """获取一个可用于文本请求的 token。"""
         excluded = set(excluded_tokens or set())
         with self._lock:
             candidates = [
@@ -641,6 +626,7 @@ class AccountService:
         return self.refresh_access_token(access_token, event="get_text_access_token") or access_token
 
     def mark_text_used(self, access_token: str) -> None:
+        """记录文本请求最近使用时间。"""
         if not access_token:
             return
         with self._lock:
@@ -656,20 +642,32 @@ class AccountService:
             self._accounts[access_token] = account
             self._save_accounts()
 
-    def remove_invalid_token(self, access_token: str, event: str, quiet: bool = False) -> bool:
+    def remove_invalid_token(self, access_token: str, event: str, error: str = "", quiet: bool = False) -> bool:
+        """按配置移除或标记异常 token。"""
         if not config.auto_remove_invalid_accounts:
-            self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=quiet)
+            self.update_account(
+                access_token,
+                {
+                    "status": "异常",
+                    "quota": 0,
+                    "last_refresh_error": str(error or "invalid access token"),
+                    "last_refresh_error_at": datetime.now(timezone.utc).isoformat(),
+                },
+                quiet=quiet,
+            )
             return False
         removed = self.get_account(access_token) is not None
         self.delete_accounts([access_token])
         if removed:
-            log_service.add(LOG_TYPE_ACCOUNT, "自动移除异常账号",
-                            {"source": event, "token": anonymize_token(access_token)})
-        elif access_token:
-            self.update_account(access_token, {"status": "异常", "quota": 0}, quiet=quiet)
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "自动移除异常账号",
+                {"source": event, "token": anonymize_token(access_token), "error": str(error or "")},
+            )
         return removed
 
     def get_account(self, access_token: str) -> dict | None:
+        """获取单个账号副本。"""
         if not access_token:
             return None
         with self._lock:
@@ -692,30 +690,31 @@ class AccountService:
                 result.append(account)
             return result
 
-    def list_limited_tokens(self) -> list[str]:
+    def list_due_refresh_tokens(self, status: str) -> list[str]:
+        """按账号独立刷新时间列出到期 token。"""
+        now = datetime.now(timezone.utc)
+        due_items: list[tuple[datetime, str]] = []
         with self._lock:
-            return [
-                token
-                for item in self._accounts.values()
-                if item.get("status") == "限流"
-                   and (token := item.get("access_token") or "")
-            ]
-
-    def list_normal_tokens(self) -> list[str]:
-        with self._lock:
-            return [
-                token
-                for item in self._accounts.values()
-                if item.get("status") == "正常"
-                   and (token := item.get("access_token") or "")
-            ]
+            for account in self._accounts.values():
+                token = str(account.get("access_token") or "").strip()
+                if account.get("status") != status or not token:
+                    continue
+                if token in self._refreshing_tokens:
+                    continue
+                due_at = self._account_refresh_due_at(account, now)
+                if due_at <= now:
+                    due_items.append((due_at, token))
+        due_items.sort(key=lambda item: item[0])
+        return [token for _, token in due_items[: self._ACCOUNT_REFRESH_BATCH_SIZE]]
 
     @staticmethod
     def _account_payload_token(item: dict) -> str:
+        """从账号导入 payload 中提取 access_token。"""
         return str(item.get("access_token") or item.get("accessToken") or "").strip()
 
     @staticmethod
     def _prepare_account_payload(item: dict) -> dict | None:
+        """整理账号导入 payload 并补充 JWT 中的基础信息。"""
         if not isinstance(item, dict):
             return None
         access_token = AccountService._account_payload_token(item)
@@ -747,6 +746,7 @@ class AccountService:
         return payload
 
     def add_account_items(self, items: list[dict]) -> dict:
+        """导入结构化账号 payload。"""
         payloads = [
             payload
             for item in items
@@ -755,6 +755,7 @@ class AccountService:
         return self._add_account_payloads(payloads)
 
     def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
+        """按 access_token 列表导入账号。"""
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
@@ -764,6 +765,7 @@ class AccountService:
         ])
 
     def _add_account_payloads(self, payloads: list[dict]) -> dict:
+        """写入去重后的账号 payload 并返回账号列表。"""
         deduped: dict[str, dict] = {}
         for payload in payloads:
             if not isinstance(payload, dict):
@@ -784,9 +786,7 @@ class AccountService:
                 current = self._accounts.get(access_token)
                 if current is None:
                     added += 1
-                    self._cumulative_total += 1
-                    self._save_cumulative_total()
-                    current = {"created_at": self._now()}
+                    current = {"created_at": utc_now_text()}
                 else:
                     skipped += 1
                 incoming = dict(payload)
@@ -809,6 +809,7 @@ class AccountService:
         return {"added": added, "skipped": skipped, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> None:
+        """删除指定 token 对应的账号和运行时状态。"""
         target_set = set(token for token in tokens if token)
         if not target_set:
             return
@@ -830,6 +831,7 @@ class AccountService:
             log_service.add(LOG_TYPE_ACCOUNT, "删除账号", {})
 
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
+        """合并更新单个账号并返回最新账号信息。"""
         if not access_token:
             return None
         with self._lock:
@@ -854,67 +856,21 @@ class AccountService:
         return None
 
     def _record_refresh_success(self, access_token: str) -> None:
+        """记录账号刷新成功并清理失败状态。"""
         with self._lock:
             access_token = self._resolve_access_token_locked(access_token)
             current = self._accounts.get(access_token)
             if current is None:
                 return
             next_item = dict(current)
-            next_item["invalid_count"] = 0
-            next_item["last_invalid_at"] = None
             next_item["last_refresh_error"] = None
             next_item["last_refresh_error_at"] = None
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
 
-    def _should_defer_invalid_token(self, account: dict | None, now: datetime) -> bool:
-        if not isinstance(account, dict):
-            return False
-        created_at = self._parse_time(account.get("created_at"))
-        if created_at is not None and (now - created_at).total_seconds() < self._NEW_ACCOUNT_INVALID_GRACE_SECONDS:
-            return True
-        last_invalid_at = self._parse_time(account.get("last_invalid_at"))
-        invalid_count = int(account.get("invalid_count") or 0)
-        if invalid_count <= 1:
-            return True
-        if last_invalid_at is not None and (now - last_invalid_at).total_seconds() < self._INVALID_CONFIRM_SECONDS:
-            return True
-        return False
-
-    def _record_invalid_token_seen(
-        self,
-        access_token: str,
-        event: str,
-        error: str,
-        defer_invalid_removal: bool = True,
-    ) -> bool:
-        now = datetime.now(timezone.utc)
-        with self._lock:
-            access_token = self._resolve_access_token_locked(access_token)
-            current = self._accounts.get(access_token)
-            if current is None:
-                return True
-            should_defer = defer_invalid_removal and self._should_defer_invalid_token(current, now)
-            next_item = dict(current)
-            next_item["invalid_count"] = int(next_item.get("invalid_count") or 0) + 1
-            next_item["last_invalid_at"] = now.isoformat()
-            next_item["last_refresh_error"] = str(error or "invalid access token")
-            next_item["last_refresh_error_at"] = now.isoformat()
-            account = self._normalize_account(next_item)
-            if account is not None:
-                self._accounts[access_token] = account
-                self._save_accounts()
-            if should_defer:
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "暂缓标记异常账号",
-                    {"source": event, "token": anonymize_token(access_token), "error": str(error or "")},
-                )
-                return False
-        return True
-
     def mark_image_result(self, access_token: str, success: bool) -> dict | None:
+        """记录图片任务结果并更新账号额度状态。"""
         if not access_token:
             return None
         self.release_image_slot(access_token)
@@ -950,18 +906,14 @@ class AccountService:
             return dict(account)
         return None
 
-    def fetch_remote_info(
-        self,
-        access_token: str,
-        event: str = "fetch_remote_info",
-        defer_invalid_removal: bool = True,
-    ) -> dict[str, Any] | None:
+    def fetch_remote_info(self, access_token: str, event: str = "fetch_remote_info") -> dict[str, Any] | None:
+        """拉取远端账号信息并同步到本地账号。"""
         if not access_token:
             raise ValueError("access_token is required")
 
         active_token = self.refresh_access_token(access_token, event=f"{event}:preflight") or access_token
         try:
-            from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
+            from services.protocol.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
             account = self.get_account(active_token) or {"access_token": active_token}
             result = OpenAIBackendAPI(account=account).get_user_info()
         except InvalidAccessTokenError as exc:
@@ -971,51 +923,32 @@ class AccountService:
                     account = self.get_account(refreshed_token) or {"access_token": refreshed_token}
                     result = OpenAIBackendAPI(account=account).get_user_info()
                 except InvalidAccessTokenError as retry_exc:
-                    if self._record_invalid_token_seen(
-                        refreshed_token,
-                        event,
-                        str(retry_exc),
-                        defer_invalid_removal=defer_invalid_removal,
-                    ):
-                        self.remove_invalid_token(refreshed_token, event)
+                    self.remove_invalid_token(refreshed_token, event, str(retry_exc))
                     raise
                 active_token = refreshed_token
             else:
-                if self._record_invalid_token_seen(
-                    active_token,
-                    event,
-                    str(exc),
-                    defer_invalid_removal=defer_invalid_removal,
-                ):
-                    self.remove_invalid_token(active_token, event)
+                self.remove_invalid_token(active_token, event, str(exc))
                 raise
         self._record_refresh_success(active_token)
         return self.update_account(active_token, result)
 
-    def _claim_refresh_tokens(self, access_tokens: list[str]) -> tuple[list[str], int]:
-        now = datetime.now(timezone.utc)
-        interval_seconds = config.refresh_account_interval_seconds
+    def _claim_refresh_tokens(self, access_tokens: list[str]) -> list[str]:
+        """占用可刷新的 token，避免并发重复刷新。"""
         claimed: list[str] = []
-        skipped = 0
         with self._lock:
             for token in access_tokens:
                 resolved = self._resolve_access_token_locked(token)
                 account = self._accounts.get(resolved)
                 if not account:
-                    skipped += 1
                     continue
                 if resolved in self._refreshing_tokens:
-                    skipped += 1
-                    continue
-                last_refreshed_at = self._parse_time(account.get("last_refreshed_at"))
-                if last_refreshed_at and (now - last_refreshed_at).total_seconds() < interval_seconds:
-                    skipped += 1
                     continue
                 self._refreshing_tokens.add(resolved)
                 claimed.append(resolved)
-        return claimed, skipped
+        return claimed
 
     def _release_refresh_token(self, access_token: str, refreshed: bool) -> None:
+        """释放刷新占用，并在成功时记录刷新时间。"""
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)
@@ -1031,32 +964,22 @@ class AccountService:
                 self._accounts[resolved] = account
                 self._save_accounts()
 
-    def refresh_accounts(
-        self,
-        access_tokens: list[str],
-        defer_invalid_removal: bool = True,
-    ) -> dict[str, Any]:
+    def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
+        """批量刷新账号信息并返回刷新结果统计。"""
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
-            items = self.list_accounts()
-            return {"refreshed": 0, "skipped": 0, "errors": [], "items": items}
+            return {"refreshed": 0, "failed": 0}
 
         refreshed = 0
-        errors = []
-        refresh_tokens, skipped = self._claim_refresh_tokens(access_tokens)
+        failed = 0
+        refresh_tokens = self._claim_refresh_tokens(access_tokens)
         if not refresh_tokens:
-            return {
-                "refreshed": 0,
-                "skipped": skipped,
-                "errors": [],
-                "items": self.list_accounts(),
-            }
+            return {"refreshed": 0, "failed": 0}
         max_workers = min(10, len(refresh_tokens))
 
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal): token
+                executor.submit(self.fetch_remote_info, token, "refresh_accounts"): token
                 for token in refresh_tokens
             }
             for future in as_completed(futures):
@@ -1064,88 +987,21 @@ class AccountService:
                 account = None
                 try:
                     account = future.result()
-                except (KeyboardInterrupt, SystemExit):
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise
                 except Exception as exc:
-                    error_str = str(exc)
-                    # TLS/代理连接错误是网络问题，不计入账号失败
-                    from services.protocol.conversation import is_tls_connection_error
-                    if not is_tls_connection_error(error_str):
-                        errors.append({"token": anonymize_token(token), "error": error_str})
+                    failed += 1
+                    print(f"[account-refresh] {anonymize_token(token)} failed: {exc}")
                 else:
                     if account is not None:
                         refreshed += 1
+                    else:
+                        failed += 1
                 finally:
                     self._release_refresh_token(token, account is not None)
-        except (KeyboardInterrupt, SystemExit):
-            for token in refresh_tokens:
-                self._release_refresh_token(token, False)
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
-        else:
-            executor.shutdown(wait=True, cancel_futures=True)
 
-        result = {
-            "refreshed": refreshed,
-            "skipped": skipped,
-            "errors": errors,
-            "items": self.list_accounts(),
-        }
-
-        return result
-
-    def build_export_items(self, access_tokens: list[str] | None = None) -> list[dict[str, str]]:
-        target_tokens = set(token for token in (access_tokens or []) if token)
-        with self._lock:
-            accounts = [
-                dict(item)
-                for item in self._accounts.values()
-                if not target_tokens or str(item.get("access_token") or "") in target_tokens
-            ]
-
-        items: list[dict[str, str]] = []
-        for account in accounts:
-            access_token = str(account.get("access_token") or "").strip()
-            refresh_token = str(account.get("refresh_token") or "").strip()
-            id_token = str(account.get("id_token") or "").strip()
-            if not access_token or not refresh_token or not id_token:
-                continue
-
-            access_payload = self._decode_jwt_payload(access_token)
-            id_payload = self._decode_jwt_payload(id_token)
-            auth_claim = access_payload.get("https://api.openai.com/auth")
-            auth_claim = auth_claim if isinstance(auth_claim, dict) else {}
-            profile_claim = access_payload.get("https://api.openai.com/profile")
-            profile_claim = profile_claim if isinstance(profile_claim, dict) else {}
-
-            email = (
-                str(account.get("email") or "").strip()
-                or str(profile_claim.get("email") or "").strip()
-                or str(id_payload.get("email") or "").strip()
-            )
-            account_id = (
-                str(account.get("account_id") or "").strip()
-                or str(auth_claim.get("chatgpt_account_id") or "").strip()
-                or str(account.get("user_id") or "").strip()
-            )
-            item = {
-                "type": str(account.get("export_type") or "codex"),
-                "email": email,
-                "account_id": account_id,
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "id_token": id_token,
-                "expired": self._timestamp_to_iso(access_payload.get("exp")),
-                "last_refresh": self._timestamp_to_iso(access_payload.get("iat")),
-            }
-            password = str(account.get("password") or "").strip()
-            if password:
-                item["password"] = password
-            items.append(item)
-        return items
+        return {"refreshed": refreshed, "failed": failed}
 
     def get_stats(self) -> dict:
+        """统计账号数量、状态、额度和调用结果。"""
         with self._lock:
             items = list(self._accounts.values())
         total = len(items)
@@ -1163,7 +1019,6 @@ class AccountService:
             by_type[t] = by_type.get(t, 0) + 1
         return {
             "total": total,
-            "cumulative_total": self._cumulative_total,
             "active": active,
             "limited": limited,
             "abnormal": abnormal,
@@ -1173,14 +1028,6 @@ class AccountService:
             "total_success": total_success,
             "total_fail": total_fail,
             "by_type": by_type,
-        }
-
-    def account_health(self) -> dict:
-        stats = self.get_stats()
-        return {
-            "healthy": stats["active"] > 0 or stats["unlimited_quota_count"] > 0,
-            "status": "ok" if stats["active"] > 0 else "degraded",
-            **stats,
         }
 
 

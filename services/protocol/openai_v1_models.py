@@ -4,7 +4,7 @@ from typing import Any
 
 from services.account.account_service import account_service
 from services.config import CODEX_SYSTEM_TYPE, config
-from services.openai_backend_api import OpenAIBackendAPI
+from services.protocol.openai_backend_api import OpenAIBackendAPI
 from utils.helper import CODEX_IMAGE_MODEL
 
 

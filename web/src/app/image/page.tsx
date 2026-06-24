@@ -18,13 +18,20 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import {
-  createImageEditTask,
-  createImageGenerationTask,
+  clearConversations,
+  createImageEditTurn,
+  createImageGenerationTurn,
+  deleteConversation,
+  deleteConversationTurnPart,
   fetchAccounts,
+  fetchConversations,
   fetchModels,
   fetchImageTasks,
+  renameConversation,
   resumeImagePoll,
   type Account,
+  type ConversationTurn,
+  type GenerationConversation,
   type ImageModel,
   type Model,
   type ImageTask,
@@ -32,13 +39,7 @@ import {
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { useSettingsStore } from "@/app/settings/store";
 import {
-  clearImageConversations,
-  deleteImageConversation,
   getImageConversationStats,
-  listImageConversations,
-  renameImageConversation,
-  saveImageConversation,
-  saveImageConversations,
   type ImageConversation,
   type ImageConversationMode,
   type ImageTurn,
@@ -85,6 +86,79 @@ function clampImageCount(value: string) {
 function parseImageSize(size: string) {
   const match = size.match(/^(\d+)x(\d+)$/);
   return match ? { width: match[1], height: match[2] } : { width: "1024", height: "1024" };
+}
+
+function taskToStoredImage(task: ImageTask, index: number): StoredImage {
+  const first = task.data?.[0] || task.result?.items?.find((item) => item.type === "image");
+  if (task.status === "success" && first?.url) {
+    return {
+      id: `${task.id}-${index}`,
+      taskId: task.id,
+      status: "success",
+      url: first.url,
+      revised_prompt: first.revised_prompt,
+      durationMs: task.duration_ms,
+    };
+  }
+  if (task.status === "error") {
+    return {
+      id: `${task.id}-${index}`,
+      taskId: task.id,
+      status: "error",
+      error: task.error || "生成失败",
+      durationMs: task.duration_ms,
+    };
+  }
+  return {
+    id: `${task.id}-${index}`,
+    taskId: task.id,
+    status: "loading",
+    taskStatus: task.status === "queued" ? "queued" : "running",
+    progress: task.progress,
+    elapsedSecs: task.elapsed_seconds,
+    elapsedUpdatedAt: task.elapsed_seconds != null ? Date.now() : undefined,
+  };
+}
+
+function convertBackendTurn(turn: ConversationTurn): ImageTurn {
+  const tasks = Array.isArray(turn.tasks) ? turn.tasks : [];
+  const images = tasks.length > 0
+    ? tasks.map(taskToStoredImage)
+    : turn.task_ids.map((taskId, index) => ({
+        id: `${taskId}-${index}`,
+        taskId,
+        status: "loading" as const,
+      }));
+  return {
+    id: turn.id,
+    prompt: turn.prompt || "",
+    model: turn.model || "gpt-image-2",
+    mode: turn.mode === "edit" ? "edit" : "generate",
+    referenceImages: (turn.reference_images || []).map((image) => ({
+      name: image.name || "reference.png",
+      type: image.mime_type || "image/png",
+      url: image.url,
+    })),
+    count: Number(turn.count || images.length || 1),
+    size: turn.size || "",
+    ratio: turn.ratio || "1:1",
+    tier: turn.tier || "1k",
+    quality: turn.quality || "auto",
+    images,
+    createdAt: turn.created_at,
+    status: turn.status,
+    error: tasks.find((task) => task.status === "error")?.error,
+  };
+}
+
+function convertBackendConversation(conversation: GenerationConversation): ImageConversation {
+  return {
+    id: conversation.id,
+    title: conversation.title || "图片对话",
+    createdAt: conversation.created_at,
+    updatedAt: conversation.updated_at,
+    turns: conversation.turns.map(convertBackendTurn),
+  };
 }
 
 const activeConversationQueueIds = new Set<string>();
@@ -174,6 +248,13 @@ function buildReferenceImageFromResult(image: StoredImage, fileName: string): St
   };
 }
 
+function buildReferenceFileFromReference(image: StoredReferenceImage) {
+  if (image.dataUrl) {
+    return dataUrlToFile(image.dataUrl, image.name, image.type);
+  }
+  return image.url ? fetchImageAsFile(image.url, image.name || "reference.png") : null;
+}
+
 async function fetchImageAsFile(url: string, fileName: string) {
   const response = await fetch(url);
   if (!response.ok) {
@@ -250,8 +331,8 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
   const startTime = shouldSetStartTime ? Date.now() : image.startTime;
   // elapsedSecs 仅使用后端返回的值，确保计时从 image_stream_resolve_start 开始
   const elapsedSecs =
-    newTaskStatus === "running" && typeof task.elapsed_secs === "number"
-      ? task.elapsed_secs
+    newTaskStatus === "running" && typeof (task.elapsed_secs ?? task.elapsed_seconds) === "number"
+      ? (task.elapsed_secs ?? task.elapsed_seconds)
       : undefined;
 
   return {
@@ -309,13 +390,11 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     new Set(
       items.flatMap((conversation) =>
         conversation.turns.flatMap((turn) =>
-          turn.resultsDeleted
-            ? []
-            : turn.images.flatMap((image) =>
-                (image.status === "loading" || (image.status === "error" && image.taskId))
-                  ? [image.taskId!]
-                  : [],
-              ),
+          turn.images.flatMap((image) =>
+            (image.status === "loading" || (image.status === "error" && image.taskId))
+              ? [image.taskId!]
+              : [],
+          ),
         ),
       ),
     ),
@@ -331,7 +410,6 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     return items;
   }
   const taskMap = new Map(taskList.items.map((task) => [task.id, task]));
-  let changed = false;
   const normalized = items.map((conversation) => {
     const turns = conversation.turns.map((turn) => {
       let turnChanged = false;
@@ -355,7 +433,6 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
       if (!turnChanged) {
         return turn;
       }
-      changed = true;
       const derived = deriveTurnStatus({ ...turn, images });
       return {
         ...turn,
@@ -373,14 +450,10 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     };
   });
 
-  if (changed) {
-    await saveImageConversations(normalized);
-  }
   return normalized;
 }
 
 async function recoverConversationHistory(items: ImageConversation[]) {
-  let changed = false;
   const normalized = items.map((conversation) => {
     const turns = conversation.turns.map((turn) => {
       if (turn.status !== "queued" && turn.status !== "generating" && turn.status !== "error") {
@@ -403,7 +476,6 @@ async function recoverConversationHistory(items: ImageConversation[]) {
       if (!turnChanged && derived.status === turn.status && derived.error === turn.error) {
         return turn;
       }
-      changed = true;
       return {
         ...turn,
         ...derived,
@@ -421,10 +493,6 @@ async function recoverConversationHistory(items: ImageConversation[]) {
       updatedAt: new Date().toISOString(),
     };
   });
-
-  if (changed) {
-    await saveImageConversations(normalized);
-  }
 
   return syncConversationImageTasks(normalized);
 }
@@ -605,8 +673,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       setImageQuality(storedQuality || "auto");
       setImageCount(storedCount ? clampImageCount(storedCount) : "1");
 
-      const items = await listImageConversations();
-      const normalizedItems = await recoverConversationHistory(items);
+      const response = await fetchConversations("image");
+      const normalizedItems = response.items.map(convertBackendConversation);
       if (loadCancelledRef.current) {
         return;
       }
@@ -866,7 +934,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     ]);
     conversationsRef.current = nextConversations;
     setConversations(nextConversations);
-    await saveImageConversation(conversation);
   };
 
   const updateConversation = useCallback(
@@ -883,9 +950,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       ]);
       conversationsRef.current = nextConversations;
       setConversations(nextConversations);
-      if (options.persist !== false) {
-        await saveImageConversation(nextConversation);
-      }
+      void options;
     },
     [],
   );
@@ -922,58 +987,22 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     try {
-      await deleteImageConversation(id);
+      await deleteConversation(id);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
-      const items = await listImageConversations();
-      conversationsRef.current = items;
-      setConversations(items);
+      await loadHistory();
     }
   };
 
   const handleDeleteTurnPart = async (conversationId: string, turnId: string, part: "prompt" | "results") => {
-    const conversation = conversationsRef.current.find((item) => item.id === conversationId);
-    if (!conversation) {
-      return;
-    }
-
-    const turns = conversation.turns
-      .map((turn) => {
-        if (turn.id !== turnId) {
-          return turn;
-        }
-        const nextTurn = {
-          ...turn,
-          prompt: part === "prompt" ? "" : turn.prompt,
-          promptDeleted: part === "prompt" ? true : turn.promptDeleted,
-          resultsDeleted: part === "results" ? true : turn.resultsDeleted,
-          status: part === "results" && turn.status === "generating" ? "error" as const : turn.status,
-          images:
-            part === "results"
-              ? turn.images.map((image) => ({ id: image.id, status: "error" as const, error: "生成结果已删除" }))
-              : turn.images,
-        };
-        return nextTurn.promptDeleted && nextTurn.resultsDeleted ? null : nextTurn;
-      })
-      .filter((turn): turn is ImageTurn => Boolean(turn));
-
-    if (turns.length === 0) {
-      await handleDeleteConversation(conversationId);
-      return;
-    }
-
-    const nextConversation = {
-      ...conversation,
-      updatedAt: new Date().toISOString(),
-      turns,
-    };
-    await persistConversation(nextConversation);
+    await deleteConversationTurnPart(conversationId, turnId, part);
+    await loadHistory();
   };
 
   const handleClearHistory = async () => {
     try {
-      await clearImageConversations();
+      await clearConversations("image");
       conversationsRef.current = [];
       setConversations([]);
       setSelectedConversationId(null);
@@ -992,7 +1021,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     conversationsRef.current = sortImageConversations(nextConversations);
     setConversations(conversationsRef.current);
     try {
-      await renameImageConversation(id, title);
+      await renameConversation(id, title);
     } catch (error) {
       const message = error instanceof Error ? error.message : "重命名失败";
       toast.error(message);
@@ -1085,13 +1114,13 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     async (conversationId: string, image: StoredImage | StoredReferenceImage) => {
       try {
         const nextReference =
-          "dataUrl" in image
+          "name" in image
             ? {
                 referenceImage: image,
-                file: dataUrlToFile(image.dataUrl, image.name, image.type),
+                file: await buildReferenceFileFromReference(image),
               }
             : await buildReferenceImageFromStoredImage(image, `conversation-${conversationId}-${Date.now()}.png`);
-        if (!nextReference) {
+        if (!nextReference || !nextReference.file) {
           return;
         }
 
@@ -1128,9 +1157,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     setImageQuality(turn.quality);
     setImageModel(turn.model);
     setReferenceImages(turn.referenceImages);
-    setReferenceImageFiles(
-      turn.referenceImages.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)),
-    );
+    const files = await Promise.all(turn.referenceImages.map((image) => buildReferenceFileFromReference(image)));
+    setReferenceImageFiles(files.filter((file): file is File => Boolean(file)));
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -1181,7 +1209,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
           const turns = conversation.turns.map((turn) => {
-            if (turn.id !== activeTurn.id) {
+            if (!turn.images.some((image) => image.taskId && taskMap.has(image.taskId))) {
               return turn;
             }
             const images = turn.images.map((image) => {
@@ -1205,33 +1233,15 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       };
 
       try {
-
-        const referenceFiles = activeTurn.referenceImages.map((image, index) =>
-          dataUrlToFile(image.dataUrl, image.name || `${activeTurn.id}-${index + 1}.png`, image.type),
-        );
-        if (activeTurn.mode === "edit" && referenceFiles.length === 0) {
-          throw new Error("未找到可用于继续编辑的参考图");
-        }
-
-        const pendingImages = activeTurn.images.filter((image) => image.status === "loading");
-        const submitted = await Promise.all(
-          pendingImages.map((image) => {
-            const taskId = image.taskId || image.id;
-            return activeTurn.mode === "edit"
-              ? createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality)
-              : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality);
-          }),
-        );
-        await applyTasks(submitted);
-
         let consecutiveErrors = 0;
         const retryingTaskIdsRef = new Set<string>();
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
-          const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
           const loadingTaskIds =
-            latestTurn?.images.flatMap((image) =>
-              image.status === "loading" && image.taskId ? [image.taskId] : [],
+            latestConversation?.turns.flatMap((turn) =>
+              turn.images.flatMap((image) =>
+                image.status === "loading" && image.taskId ? [image.taskId] : [],
+              ),
             ) || [];
           if (loadingTaskIds.length === 0) {
             break;
@@ -1261,21 +1271,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 await applyTasks([timeoutTask]);
               } else {
                 await applyTasks(taskList.items);
-              }
-            }
-            if (taskList.missing_ids.length > 0 && latestTurn) {
-              const missingImages = latestTurn.images.filter(
-                (image) => image.status === "loading" && image.taskId && taskList.missing_ids.includes(image.taskId),
-              );
-              const resubmitted = await Promise.all(
-                missingImages.map((image) =>
-                  activeTurn.mode === "edit"
-                    ? createImageEditTask(image.taskId || image.id, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality)
-                    : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size, activeTurn.quality),
-                ),
-              );
-              if (resubmitted.length > 0) {
-                await applyTasks(resubmitted);
               }
             }
           } catch (pollError) {
@@ -1337,32 +1332,23 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         return;
       }
 
-      const now = new Date().toISOString();
-      const nextTurnId = createId();
       const count = Math.max(1, sourceTurn.count || sourceTurn.images.length || 1);
-      const nextTurn: ImageTurn = {
-        id: nextTurnId,
+      const payload = {
+        conversation_id: conversationId,
         prompt: sourceTurn.prompt,
         model: sourceTurn.model,
-        mode: sourceTurn.mode,
-        referenceImages: sourceTurn.referenceImages,
-        count,
         size: sourceTurn.size,
+        quality: sourceTurn.quality,
+        count,
         ratio: sourceTurn.ratio,
         tier: sourceTurn.tier,
-        quality: sourceTurn.quality,
-        images: createLoadingImages(nextTurnId, count),
-        createdAt: now,
-        status: "queued",
       };
-      const nextConversation = {
-        ...conversation,
-        updatedAt: now,
-        turns: [...conversation.turns, nextTurn],
-      };
-
+      const next = sourceTurn.mode === "edit"
+        ? await createImageEditTurn(payload, (await Promise.all(sourceTurn.referenceImages.map(buildReferenceFileFromReference))).filter((file): file is File => Boolean(file)))
+        : await createImageGenerationTurn(payload);
+      const converted = convertBackendConversation(next);
       setSelectedConversationId(conversationId);
-      await persistConversation(nextConversation);
+      await persistConversation(converted);
       void runConversationQueue(conversationId);
       toast.success("已加入重新生成队列");
     },
@@ -1376,39 +1362,25 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         return;
       }
 
-      const now = new Date().toISOString();
-      const retryImageId = `${turnId}-${createId()}`;
-      const nextConversation = {
-        ...conversation,
-        updatedAt: now,
-        turns: conversation.turns.map((turn) => {
-          if (turn.id !== turnId) {
-            return turn;
-          }
-          if (!turn.prompt.trim()) {
-            return turn;
-          }
-
-          const images = turn.images.map((image) =>
-            image.id === imageId
-              ? {
-                  id: retryImageId,
-                  taskId: retryImageId,
-                  status: "loading" as const,
-                }
-              : image,
-          );
-          const derived = deriveTurnStatus({ ...turn, status: "queued", images });
-          return {
-            ...turn,
-            ...derived,
-            images,
-          };
-        }),
+      const turn = conversation.turns.find((item) => item.id === turnId);
+      if (!turn?.prompt.trim()) {
+        return;
+      }
+      const payload = {
+        conversation_id: conversationId,
+        prompt: turn.prompt,
+        model: turn.model,
+        size: turn.size,
+        quality: turn.quality,
+        count: 1,
+        ratio: turn.ratio,
+        tier: turn.tier,
       };
-
+      const next = turn.mode === "edit"
+        ? await createImageEditTurn(payload, (await Promise.all(turn.referenceImages.map(buildReferenceFileFromReference))).filter((file): file is File => Boolean(file)))
+        : await createImageGenerationTurn(payload);
       setSelectedConversationId(conversationId);
-      await persistConversation(nextConversation);
+      await persistConversation(convertBackendConversation(next));
       void runConversationQueue(conversationId);
     },
     [runConversationQueue],
@@ -1511,7 +1483,6 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         !activeConversationQueueIds.has(conversation.id) &&
         conversation.turns.some(
           (turn) =>
-            !turn.resultsDeleted &&
             (turn.status === "queued" || turn.status === "generating") &&
             turn.images.some((image) => image.status === "loading"),
         )
@@ -1533,53 +1504,36 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     const targetConversation = selectedConversationId
       ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
       : null;
-    const now = new Date().toISOString();
-    const conversationId = targetConversation?.id ?? createId();
-    const turnId = createId();
     const imageSize = `${imageWidth || 1024}x${imageHeight || 1024}`;
-    const draftTurn: ImageTurn = {
-      id: turnId,
+    const payload = {
+      conversation_id: targetConversation?.id || "",
       prompt,
       model: imageModel,
-      mode: effectiveImageMode,
-      referenceImages: effectiveImageMode === "edit" ? referenceImages : [],
-      count: parsedCount,
       size: imageSize,
+      quality: imageQuality,
+      count: parsedCount,
       ratio: imageRatio,
       tier: imageTier,
-      quality: imageQuality,
-      images: createLoadingImages(turnId, parsedCount),
-      createdAt: now,
-      status: "queued",
     };
-
-    const baseConversation: ImageConversation = targetConversation
-      ? {
-          ...targetConversation,
-          updatedAt: now,
-          turns: [...targetConversation.turns, draftTurn],
-        }
-      : {
-          id: conversationId,
-          title: buildConversationTitle(prompt),
-          createdAt: now,
-          updatedAt: now,
-          turns: [draftTurn],
-      };
 
     shouldStickToBottomRef.current = true;
     const btn = scrollToLatestBtnRef.current;
     if (btn) btn.style.display = "none";
-    setSelectedConversationId(conversationId);
-    clearComposerInputs();
+    try {
+      const next = effectiveImageMode === "edit"
+        ? await createImageEditTurn(payload, referenceImageFiles)
+        : await createImageGenerationTurn(payload);
+      const converted = convertBackendConversation(next);
+      setSelectedConversationId(converted.id);
+      clearComposerInputs();
+      await persistConversation(converted);
+      void runConversationQueue(converted.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "创建图片任务失败");
+      return;
+    }
 
-    await persistConversation(baseConversation);
-    void runConversationQueue(conversationId);
-
-    const targetStats = getImageConversationStats(baseConversation);
-    if (targetStats.running > 0 || targetStats.queued > 1) {
-      toast.success("已加入当前对话队列");
-    } else if (!targetConversation) {
+    if (!targetConversation) {
       toast.success("已创建新对话并开始处理");
     } else {
       toast.success("已发送到当前对话");

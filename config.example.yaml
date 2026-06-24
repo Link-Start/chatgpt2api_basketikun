@@ -1,5 +1,5 @@
 # 账号刷新间隔，单位秒。账号刷新完成后需等待该时间才会再次刷新。
-refresh_account_interval_seconds: 300
+refresh_account_interval_seconds: 60
 
 # 本地图片保留天数，超过后启动时会自动清理。
 image_retention_days: 15
@@ -148,8 +148,12 @@ codex_channels:
   channels:
     - id: system
       type: system
+      enabled: true
       name: 系统渠道
       weight: 1
+      mapped_models:
+        - gpt-image-2
+      mapped_model: gpt-image-2
     - enabled: false
       type: tool_call
       name: 示例工具调用中转站
@@ -157,4 +161,6 @@ codex_channels:
       api_key: ""
       upstream_model: gpt-5.5
       weight: 1
+      mapped_models:
+        - gpt-image-2
       mapped_model: gpt-image-2

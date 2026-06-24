@@ -86,22 +86,6 @@ def _extract_json_image_value(item: object) -> tuple[str, str | None, str | None
     return value, filename, mime_type
 
 
-def normalize_json_edit_images(image: object = None, images: object = None) -> list[tuple[bytes, str, str]]:
-    raw_images = images if images is not None else image
-    if raw_images is None:
-        raise HTTPException(status_code=400, detail={"error": "image file is required"})
-    entries = raw_images if isinstance(raw_images, list) else [raw_images]
-    if not entries:
-        raise HTTPException(status_code=400, detail={"error": "image file is required"})
-    if len(entries) > MAX_JSON_EDIT_IMAGES:
-        raise HTTPException(status_code=400, detail={"error": f"images supports up to {MAX_JSON_EDIT_IMAGES} items"})
-    normalized = []
-    for index, item in enumerate(entries, start=1):
-        value, filename, mime_type = _extract_json_image_value(item)
-        normalized.append(_decode_json_image_string(value, index, filename, mime_type))
-    return normalized
-
-
 def new_uuid() -> str:
     return str(uuid.uuid4())
 

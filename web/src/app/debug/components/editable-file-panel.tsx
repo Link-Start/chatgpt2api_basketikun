@@ -9,24 +9,21 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { httpRequest } from "@/lib/request";
+import { clearConversations, createEditableTask, deleteConversation, fetchTasks as fetchTaskList } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import {
-  listDeletedEditableFileIds,
-  listEditableFileDrafts,
-  saveDeletedEditableFileIds,
-  saveEditableFileDrafts,
-  type EditableFileDraft,
-} from "@/store/editable-file-history";
-
 import type { EditableFileTask } from "./types";
 
 type Props = {
   title: string;
   kind: "ppt" | "psd";
-  endpoint: string;
   defaultPrompt: string;
   imageRequired?: boolean;
+};
+
+type EditableFileDraft = {
+  prompt?: string;
+  images?: string[];
+  title?: string;
 };
 
 const MAX_HISTORY = 20;
@@ -37,7 +34,6 @@ const statusText = (status: string) => ({ queued: "排队中", running: "生成�
 const statusClass = (status: string) => status === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300" : status === "error" ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300" : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300";
 const formatElapsed = (seconds: number) => `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 const titleOfPrompt = (prompt: string, fallback: string) => prompt.trim().replace(/\s+/g, " ").slice(0, 24) || fallback;
-const createClientTaskId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 const readFile = (file: File) => new Promise<string>((resolve, reject) => {
   const reader = new FileReader();
@@ -58,6 +54,8 @@ const mergeTasks = (current: EditableFileTask[], updates: EditableFileTask[]) =>
   }
   return next.slice(0, MAX_HISTORY);
 };
+
+const toEditableTask = (task: unknown): EditableFileTask => task as EditableFileTask;
 
 const removeTasks = (current: EditableFileTask[], ids: string[]) => {
   const missing = new Set(ids);
@@ -90,7 +88,7 @@ function ResultFile({ href, icon, label }: { href?: string; icon: ReactNode; lab
   );
 }
 
-export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageRequired }: Props) {
+export function EditableFilePanel({ title, kind, defaultPrompt, imageRequired }: Props) {
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [images, setImages] = useState<string[]>([]);
   const [tasks, setTasks] = useState<EditableFileTask[]>([]);
@@ -100,11 +98,10 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now());
   const [drafts, setDrafts] = useState<Record<string, EditableFileDraft>>({});
-  const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
   const [renamingId, setRenamingId] = useState("");
   const [renamingTitle, setRenamingTitle] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: "one"; id: string } | { type: "all"; ids: string[] } | null>(null);
-  const visibleTasks = useMemo(() => tasks.filter((task) => task.kind === kind && !deletedIds.has(taskIdOf(task))).slice(0, MAX_HISTORY), [deletedIds, kind, tasks]);
+  const visibleTasks = useMemo(() => tasks.filter((task) => task.kind === kind).slice(0, MAX_HISTORY), [kind, tasks]);
   const selectedTask = selectedId === DRAFT_ID ? null : visibleTasks.find((task) => taskIdOf(task) === selectedId) || visibleTasks[0] || null;
   const running = visibleTasks.some(isRunning);
   const runningIds = visibleTasks.filter(isRunning).map(taskIdOf).join(",");
@@ -119,11 +116,10 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
     const taskIds = Array.from(new Set(ids.filter(Boolean))).slice(0, MAX_HISTORY);
     setPolling(true);
     try {
-      const path = taskIds.length ? `/v1/editable-file-tasks?ids=${taskIds.map(encodeURIComponent).join(",")}` : "/v1/editable-file-tasks";
-      const result = await httpRequest<{ items: EditableFileTask[]; missing_ids?: string[] }>(path);
+      const result = await fetchTaskList(taskIds, kind);
       const missingIds = result.missing_ids || [];
-      const hidden = await listDeletedEditableFileIds(kind);
-      setTasks((current) => (taskIds.length ? mergeTasks(removeTasks(current, missingIds), result.items || []) : (result.items || [])).filter((task) => !hidden.has(taskIdOf(task))));
+      const items = (result.items || []).map(toEditableTask);
+      setTasks((current) => taskIds.length ? mergeTasks(removeTasks(current, missingIds), items) : items);
       setSelectedId((current) => missingIds.includes(current) ? "" : current);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -133,8 +129,6 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
   }, [kind]);
 
   useEffect(() => {
-    void listEditableFileDrafts(kind).then(setDrafts);
-    void listDeletedEditableFileIds(kind).then(setDeletedIds);
     void fetchTasks();
   }, [fetchTasks, kind]);
 
@@ -174,7 +168,6 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
   const persistDrafts = (updater: (current: Record<string, EditableFileDraft>) => Record<string, EditableFileDraft>) => {
     setDrafts((current) => {
       const next = updater(current);
-      void saveEditableFileDrafts(kind, next);
       return next;
     });
   };
@@ -194,10 +187,10 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
 
   const deleteTask = (id: string) => {
     if (!id) return;
-    const nextDeleted = new Set(deletedIds);
-    nextDeleted.add(id);
-    void saveDeletedEditableFileIds(kind, nextDeleted);
-    setDeletedIds(nextDeleted);
+    const task = tasks.find((item) => taskIdOf(item) === id);
+    if (task?.conversation_id) {
+      void deleteConversation(task.conversation_id);
+    }
     setTasks((current) => current.filter((task) => taskIdOf(task) !== id));
     persistDrafts((current) => {
       const next = { ...current };
@@ -210,9 +203,7 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
   const clearHistory = () => {
     const ids = deleteConfirm?.type === "all" ? deleteConfirm.ids : tasks.filter((task) => task.kind === kind).map(taskIdOf).filter(Boolean);
     if (!ids.length) return;
-    const nextDeleted = new Set([...deletedIds, ...ids]);
-    void saveDeletedEditableFileIds(kind, nextDeleted);
-    setDeletedIds(nextDeleted);
+    void clearConversations(kind);
     setTasks((current) => current.filter((task) => task.kind !== kind || !ids.includes(taskIdOf(task))));
     persistDrafts((current) => {
       const next = { ...current };
@@ -235,7 +226,7 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
     try {
       const base64_images = images;
       if (imageRequired && !base64_images.length) throw new Error("base64_images is empty");
-      const task = await httpRequest<EditableFileTask>(endpoint, { method: "POST", body: { client_task_id: createClientTaskId(), prompt, base64_images } });
+      const task = toEditableTask(await createEditableTask(kind, prompt, base64_images));
       const polledAt = Date.now();
       const id = taskIdOf(task);
       const draft = { prompt: prompt.trim(), images: base64_images, title: titleOfPrompt(prompt, title) };
@@ -352,8 +343,8 @@ export function EditableFilePanel({ title, kind, endpoint, defaultPrompt, imageR
         </div>
         <div className="min-h-0 flex-1 space-y-5 overflow-auto p-5">
           <div className="space-y-2">
-            <Label htmlFor={`${endpoint}-prompt`} className="text-xs font-semibold text-stone-700 dark:text-stone-300">需求</Label>
-            <Textarea id={`${endpoint}-prompt`} value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-56 rounded-md border-stone-200 bg-white text-sm leading-6 shadow-none dark:border-white/10 dark:bg-white/[0.03]" />
+            <Label htmlFor={`${kind}-prompt`} className="text-xs font-semibold text-stone-700 dark:text-stone-300">需求</Label>
+            <Textarea id={`${kind}-prompt`} value={prompt} onChange={(event) => setPrompt(event.target.value)} className="min-h-56 rounded-md border-stone-200 bg-white text-sm leading-6 shadow-none dark:border-white/10 dark:bg-white/[0.03]" />
           </div>
           <div className="space-y-3">
             <div className="flex items-center justify-between">

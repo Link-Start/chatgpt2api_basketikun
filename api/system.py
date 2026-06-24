@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
-from services.codex_api import CodexAPI
+from services.protocol.codex_api import CodexAPI
 from services.config import DATA_DIR, config
 from services.image_service import (
     compress_images,

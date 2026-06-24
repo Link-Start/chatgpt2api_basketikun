@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from services.openai_backend_api import OpenAIBackendAPI
+from services.protocol.openai_backend_api import OpenAIBackendAPI
 
 
 def main() -> None:

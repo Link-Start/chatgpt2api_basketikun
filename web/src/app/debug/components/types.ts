@@ -24,6 +24,7 @@ export type EditableFileTask = {
   elapsed_seconds?: number;
   polled_at?: number;
   prompt_preview?: string;
+  conversation_id?: string;
   error?: string;
   result?: {
     conversation_id?: string;

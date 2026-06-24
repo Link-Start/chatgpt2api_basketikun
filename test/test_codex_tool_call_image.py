@@ -1,7 +1,7 @@
 import unittest
 
 from services.config import config
-from services.codex_api import CodexAPI
+from services.protocol.codex_api import CodexAPI
 from test.utils import save_image
 
 channel = next((

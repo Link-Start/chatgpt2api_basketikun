@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services.account.account_service import account_service
-from services.openai_backend_api import OpenAIBackendAPI
+from services.protocol.openai_backend_api import OpenAIBackendAPI
 from services.protocol.conversation import count_message_tokens, count_text_tokens, normalize_messages
 from services.protocol.openai_v1_chat_complete import collect_chat_content, stream_text_chat_completion
 

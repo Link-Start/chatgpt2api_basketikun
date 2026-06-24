@@ -6,8 +6,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
-from uuid import uuid4
 
 BASE_URL = "http://127.0.0.1:8000"
 PROMPT = "按原图位置拆分海报元素并合成可编辑 PSD，同时输出每个图层素材 zip。"
@@ -35,8 +33,7 @@ def request_json(method: str, path: str, payload: dict | None = None) -> dict:
 
 
 def main() -> None:
-    task = request_json("POST", "/v1/psd/generations", {
-        "client_task_id": str(uuid4()),
+    task = request_json("POST", "/api/psd/tasks", {
         "prompt": PROMPT,
         "base64_images": BASE64_IMAGES,
     })
@@ -47,7 +44,7 @@ def main() -> None:
     deadline = time.time() + TIMEOUT_SECS
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL_SECS)
-        status = request_json("GET", "/v1/editable-file-tasks?ids=" + urllib.parse.quote(task_id))
+        status = request_json("GET", "/api/tasks?ids=" + urllib.parse.quote(task_id))
         print(json.dumps(status, ensure_ascii=False, indent=2))
         item = (status.get("items") or [{}])[0]
         if item.get("status") in {"success", "error"}:

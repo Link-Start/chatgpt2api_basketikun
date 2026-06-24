@@ -146,12 +146,11 @@ const docs: ApiDoc[] = [
   {
     title: "创建 PPT 任务",
     method: "POST",
-    path: "/v1/ppt/generations",
+    path: "/api/ppt/tasks",
     icon: FileText,
     input: [
       ["prompt", "string", "PPT 需求描述，可为空但建议填写完整主题、页数、风格和内容结构。"],
       ["base64_images", "string[]", "可选，图片 data URL/base64，用作 PPT 参考素材。"],
-      ["client_task_id", "string", "可选，客户端幂等任务 ID；重复提交同 ID 会返回已有任务。"],
     ],
     output: [
       ["id / taskId", "string", "任务 ID，用于轮询状态。"],
@@ -159,7 +158,7 @@ const docs: ApiDoc[] = [
       ["kind", "ppt", "任务类型。"],
       ["created_at / updated_at", "string", "任务创建和更新时间。"],
     ],
-    example: (baseUrl: string, key: string) => `curl ${baseUrl}/ppt/generations \\
+    example: (baseUrl: string, key: string) => `curl ${baseUrl}/api/ppt/tasks \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
   -d '{"prompt":"制作一份 8 页以内的季度业务汇报 PPT","base64_images":[]}'`,
@@ -167,12 +166,11 @@ const docs: ApiDoc[] = [
   {
     title: "创建 PSD 任务",
     method: "POST",
-    path: "/v1/psd/generations",
+    path: "/api/psd/tasks",
     icon: FileArchive,
     input: [
       ["prompt", "string", "PSD 拆分与合成要求，例如保留图层、位置、背景和素材 zip。"],
       ["base64_images", "string[]", "必填，至少一张图片 data URL/base64，作为 PSD 拆分源图。"],
-      ["client_task_id", "string", "可选，客户端幂等任务 ID。"],
     ],
     output: [
       ["id / taskId", "string", "任务 ID，用于轮询状态。"],
@@ -180,7 +178,7 @@ const docs: ApiDoc[] = [
       ["kind", "psd", "任务类型。"],
       ["error", "string", "失败时返回错误信息。"],
     ],
-    example: (baseUrl: string, key: string) => `curl ${baseUrl}/psd/generations \\
+    example: (baseUrl: string, key: string) => `curl ${baseUrl}/api/psd/tasks \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
   -d '{"prompt":"按原图位置拆分海报元素并合成可编辑 PSD","base64_images":["data:image/png;base64,..."]}'`,
@@ -188,10 +186,11 @@ const docs: ApiDoc[] = [
   {
     title: "任务状态查询",
     method: "GET",
-    path: "/v1/editable-file-tasks?ids={taskId1,taskId2}",
+    path: "/api/tasks?ids={taskId1,taskId2}",
     icon: ListChecks,
     input: [
-      ["ids", "string", "可选，逗号分隔任务 ID；不传则返回当前用户全部可编辑文件任务。"],
+      ["ids", "string", "可选，逗号分隔任务 ID；不传则返回当前用户全部任务。"],
+      ["kind", "image | ppt | psd", "可选，按任务类型过滤。"],
     ],
     output: [
       ["items", "array", "任务列表。成功任务的 result 内包含 primary_url 和 zip_url。"],
@@ -199,7 +198,7 @@ const docs: ApiDoc[] = [
       ["result.primary_url", "string", "主文件下载地址。"],
       ["result.zip_url", "string", "素材 zip 下载地址。"],
     ],
-    example: (baseUrl: string, key: string) => `curl "${baseUrl}/editable-file-tasks?ids=<task_id>" \\
+    example: (baseUrl: string, key: string) => `curl "${baseUrl}/api/tasks?ids=<task_id>" \\
   -H "Authorization: Bearer ${key}"`,
   },
   {

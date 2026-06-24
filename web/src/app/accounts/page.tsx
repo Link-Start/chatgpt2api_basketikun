@@ -386,16 +386,12 @@ function AccountsPageContent() {
     }
     try {
       const data = await refreshAccounts(accessTokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      await loadAccounts(true);
 
-      if ((data.errors ?? []).length > 0) {
-        const firstError = data.errors?.[0]?.error;
-        toast.error(
-          `刷新成功 ${data.refreshed} 个，跳过 ${data.skipped ?? 0} 个，失败 ${(data.errors ?? []).length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
-        );
+      if (data.failed > 0) {
+        toast.error(`刷新成功 ${data.refreshed} 个，失败 ${data.failed} 个`);
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户，跳过 ${data.skipped ?? 0} 个`);
+        toast.success(`刷新成功 ${data.refreshed} 个账户`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "刷新账户失败";
